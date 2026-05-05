@@ -14,4 +14,4 @@ fetch -o - https://raw.githubusercontent.com/screwys/freebsd-scripts/main/instal
 
 The guided installer requires an explicit disk choice before ZFS setup.
 
-Installs pkg `latest`, sudo/doas, fish, dev tools, GNOME/GDM, Niri, Xwayland Satellite, Quickshell with staged Noctalia files, Ghostty, browsers, editors, media apps, KDE utilities, PipeWire, fcitx5 Japanese input, screenshot/clipboard tools, fonts, portals, GPU firmware, and desktop hardening defaults.
+Installs pkg `latest` plus release-matched kmods, sudo/doas, fish, dev tools, GNOME/GDM, Niri, Xwayland Satellite, Quickshell with staged Noctalia files, Ghostty, browsers, editors, media apps, KDE utilities, PipeWire, fcitx5 Japanese input, screenshot/clipboard tools, fonts, portals, GPU firmware, and desktop hardening defaults.

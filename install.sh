@@ -48,8 +48,8 @@ hs-ShellCheck
 uv
 node
 npm
-python313
-py313-pip
+python3
+py311-pip
 '
 
 DESKTOP_PACKAGES='
@@ -109,13 +109,15 @@ shared-mime-info
 gvfs
 mesa-demos
 mesa-dri
-drm-515-kmod
-gpu-firmware-kmod
 nerd-fonts-jetbrainsmono
 noto-basic
 noto-emoji
 noto-jp
 noto-sans
+'
+
+KMOD_PACKAGES='
+drm-515-kmod
 '
 
 BROWSER_PACKAGES='
@@ -392,6 +394,18 @@ package_manifest()
 		awk 'NF { print $1 }'
 }
 
+kmod_manifest()
+{
+	printf '%s\n' "$KMOD_PACKAGES" |
+		awk 'NF { print $1 }'
+}
+
+all_package_manifest()
+{
+	printf '%s\n%s\n' "$(package_manifest)" "$(kmod_manifest)" |
+		awk 'NF { print $1 }'
+}
+
 ensure_pkg_repo()
 {
 	repo_dir=$(target_path /usr/local/etc/pkg/repos)
@@ -403,7 +417,52 @@ ensure_pkg_repo()
 	mkdir -p "$repo_dir"
 	cat >"$repo_file" <<EOF
 FreeBSD: {
-  url: "pkg+http://pkg.FreeBSD.org/\${ABI}/$PKG_BRANCH",
+  url: "pkg+https://pkg.FreeBSD.org/\${ABI}/$PKG_BRANCH",
+  mirror_type: "srv",
+  signature_type: "fingerprints",
+  fingerprints: "/usr/share/keys/pkg",
+  enabled: yes
+}
+EOF
+}
+
+freebsd_release()
+{
+	if [ "$TARGET" = "/" ]; then
+		freebsd-version -u 2>/dev/null || uname -r
+	else
+		chroot "$TARGET" /bin/sh -c 'freebsd-version -u 2>/dev/null || uname -r'
+	fi
+}
+
+kmods_flavor()
+{
+	release=$(freebsd_release)
+	case "$release" in
+		14.*-RELEASE*)
+			minor=${release#14.}
+			minor=${minor%%-*}
+			printf 'kmods_%s_%s\n' "$PKG_BRANCH" "$minor"
+			;;
+		*)
+			printf 'kmods_%s\n' "$PKG_BRANCH"
+			;;
+	esac
+}
+
+ensure_kmods_repo()
+{
+	repo_dir=$(target_path /usr/local/etc/pkg/repos)
+	repo_file=$(target_path /usr/local/etc/pkg/repos/kmods.conf)
+	flavor=$(kmods_flavor)
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would set FreeBSD kmods pkg branch to $flavor"
+		return 0
+	fi
+	mkdir -p "$repo_dir"
+	cat >"$repo_file" <<EOF
+FreeBSD-kmods: {
+  url: "pkg+https://pkg.FreeBSD.org/\${ABI}/$flavor",
   mirror_type: "srv",
   signature_type: "fingerprints",
   fingerprints: "/usr/share/keys/pkg",
@@ -423,9 +482,39 @@ pkg_exists()
 	fi
 }
 
+pkg_exists_in_repo()
+{
+	repo=$1
+	pkg=$2
+	[ "$DRY_RUN" -eq 1 ] && return 0
+	if [ "$TARGET" = "/" ]; then
+		pkg search -r "$repo" -q "^${pkg}$" >/dev/null 2>&1
+	else
+		chroot "$TARGET" /bin/sh -c "pkg search -r '$repo' -q '^${pkg}$' >/dev/null 2>&1"
+	fi
+}
+
+install_gpu_firmware_kmods()
+{
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would install available gpu-firmware-* kmods from FreeBSD-kmods"
+		return 0
+	fi
+
+	run_in_target "
+firmware_pkgs=\$(pkg search -r FreeBSD-kmods -q '^gpu-firmware-.*-kmod-' | tr '\n' ' ')
+if [ -n \"\$firmware_pkgs\" ]; then
+	env ASSUME_ALWAYS_YES=yes pkg install -y -r FreeBSD-kmods \$firmware_pkgs
+else
+	printf '%s\n' 'warn: no gpu firmware kmod packages found on FreeBSD-kmods' >&2
+fi
+"
+}
+
 install_packages()
 {
 	ensure_pkg_repo
+	ensure_kmods_repo
 
 	if ! is_freebsd && [ "$DRY_RUN" -eq 0 ]; then
 		die "package installation must run on FreeBSD"
@@ -451,6 +540,26 @@ install_packages()
 	if [ -n "$skipped" ]; then
 		warn "packages not found on this pkg branch:$skipped"
 	fi
+
+	kmod_available=
+	kmod_skipped=
+	for pkg in $(kmod_manifest); do
+		if pkg_exists_in_repo FreeBSD-kmods "$pkg"; then
+			kmod_available="$kmod_available $pkg"
+		else
+			kmod_skipped="$kmod_skipped $pkg"
+		fi
+	done
+
+	if [ -n "$kmod_available" ]; then
+		run_in_target "env ASSUME_ALWAYS_YES=yes pkg install -y -r FreeBSD-kmods $kmod_available"
+	fi
+
+	if [ -n "$kmod_skipped" ]; then
+		warn "kmod packages not found on this kmods branch:$kmod_skipped"
+	fi
+
+	install_gpu_firmware_kmods
 }
 
 configure_rc_conf()
@@ -1076,13 +1185,13 @@ PY
 
 validate_manifest()
 {
-	dupes=$(package_manifest | sort | uniq -d)
+	dupes=$(all_package_manifest | sort | uniq -d)
 	if [ -n "$dupes" ]; then
 		printf '%s\n' "$dupes" >&2
 		die "package manifest contains duplicates"
 	fi
 
-	package_manifest | awk '
+	all_package_manifest | awk '
 		$0 !~ /^[A-Za-z0-9_.+@-]+$/ {
 			printf "bad package name: %s\n", $0 > "/dev/stderr"
 			bad = 1
@@ -1144,8 +1253,10 @@ write_bsdinstall_config()
 {
 	cfg=$1
 	disk=$2
-	user_arg=
-	[ -n "$INSTALL_USER" ] && user_arg="--user $INSTALL_USER"
+	install_args="--from-installer --pkg-branch $PKG_BRANCH"
+	[ -n "$INSTALL_USER" ] && install_args="$install_args --user $INSTALL_USER"
+	[ "$SKIP_NOCTALIA" -eq 1 ] && install_args="$install_args --skip-noctalia"
+	[ "$ENABLE_CRASH_DUMPS" -eq 1 ] && install_args="$install_args --enable-crash-dumps"
 
 	cat >"$cfg" <<EOF
 DISTRIBUTIONS="kernel.txz base.txz"
@@ -1163,7 +1274,7 @@ else
 	curl -L -o /tmp/freebsd-install.sh "$INSTALL_URL"
 fi
 
-sh /tmp/freebsd-install.sh --from-installer $user_arg
+sh /tmp/freebsd-install.sh $install_args
 EOF
 }
 
