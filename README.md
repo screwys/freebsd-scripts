@@ -12,6 +12,11 @@ Guided installer:
 fetch -o - https://raw.githubusercontent.com/screwys/freebsd-scripts/main/install.sh | sh -s -- --bsdinstall-guided --user screwy
 ```
 
-The guided installer requires an explicit disk choice before ZFS setup.
+Shorter ISO shell flow:
+
+```sh
+fetch https://raw.githubusercontent.com/screwys/freebsd-scripts/main/install.sh
+sh install.sh -g -u screwy
+```
 
 Installs and configures doas for the desktop user, plus fish, dev tools, GNOME/GDM, Niri, Xwayland Satellite, Quickshell with staged Noctalia files, Ghostty, browsers, Zed from the FreeBSD port package (`zedit`), Vesktop, media apps, KDE utilities, fcitx5 Japanese input, screenshot/clipboard tools, fonts, portals, GPU firmware, and desktop hardening defaults.

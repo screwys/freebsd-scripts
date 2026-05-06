@@ -6,6 +6,7 @@ INSTALL_URL=${INSTALL_URL:-https://raw.githubusercontent.com/screwys/freebsd-scr
 TARGET=/
 INSTALL_USER=${INSTALL_USER:-}
 PKG_BRANCH=${PKG_BRANCH:-latest}
+GPU_MODULE=${GPU_MODULE:-auto}
 DRY_RUN=0
 VALIDATE_ONLY=0
 BSDINSTALL_GUIDED=0
@@ -115,9 +116,7 @@ noto-jp
 noto-sans
 '
 
-KMOD_PACKAGES='
-drm-515-kmod
-'
+KMOD_PACKAGES=''
 
 BROWSER_PACKAGES='
 firefox
@@ -164,11 +163,14 @@ usage()
 usage: sh install.sh [options]
 
 options:
-  --user NAME              desktop user to create/configure
-  --bsdinstall-guided      create a temporary bsdinstall script and run it
+  -u, --user NAME          desktop user to create/configure
+  -g, --guided             create a temporary bsdinstall script and run it
+      --bsdinstall-guided  same as --guided
   --pkg-branch NAME        FreeBSD pkg branch, default: latest
+  --gpu-module MODULE      GPU module: auto, none, i915kms, amdgpu, radeonkms, nvidia-drm
+  --no-gpu                 skip GPU module configuration
   --target PATH            configure a mounted root, default: /
-  --dry-run                print actions without changing the system
+  -n, --dry-run            print actions without changing the system
   --validate               validate generated policy JSON and manifests
   --skip-noctalia          skip Noctalia best-effort staging
   --skip-zed               skip Zed port package install
@@ -179,7 +181,7 @@ EOF
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--user)
+		-u|--user)
 			[ $# -ge 2 ] || die "--user needs a value"
 			INSTALL_USER=$2
 			shift 2
@@ -188,7 +190,7 @@ while [ $# -gt 0 ]; do
 			INSTALL_USER=${1#*=}
 			shift
 			;;
-		--bsdinstall-guided)
+		-g|--guided|--bsdinstall-guided)
 			BSDINSTALL_GUIDED=1
 			shift
 			;;
@@ -201,6 +203,19 @@ while [ $# -gt 0 ]; do
 			PKG_BRANCH=${1#*=}
 			shift
 			;;
+		--gpu-module|--gpu)
+			[ $# -ge 2 ] || die "--gpu-module needs a value"
+			GPU_MODULE=$2
+			shift 2
+			;;
+		--gpu-module=*|--gpu=*)
+			GPU_MODULE=${1#*=}
+			shift
+			;;
+		--no-gpu)
+			GPU_MODULE=none
+			shift
+			;;
 		--target)
 			[ $# -ge 2 ] || die "--target needs a value"
 			TARGET=$2
@@ -210,7 +225,7 @@ while [ $# -gt 0 ]; do
 			TARGET=${1#*=}
 			shift
 			;;
-		--dry-run)
+		-n|--dry-run)
 			DRY_RUN=1
 			shift
 			;;
@@ -251,6 +266,51 @@ done
 case "$PKG_BRANCH" in
 	latest|quarterly) ;;
 	*) die "--pkg-branch must be latest or quarterly" ;;
+esac
+
+valid_gpu_module()
+{
+	case "$1" in
+		auto|none|i915kms|amdgpu|radeonkms|nvidia-drm|nvidia-modeset|nvidia)
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+normalize_gpu_modules()
+{
+	printf '%s\n' "$1" |
+		tr ',' ' ' |
+		awk '
+			{
+				for (i = 1; i <= NF; i++) {
+					if (!seen[$i]++) {
+						if (out != "") out = out " "
+						out = out $i
+					}
+				}
+			}
+			END { print out }
+		'
+}
+
+GPU_MODULE=$(normalize_gpu_modules "$GPU_MODULE")
+[ -n "$GPU_MODULE" ] || die "--gpu-module needs a value"
+for module in $GPU_MODULE; do
+	if ! valid_gpu_module "$module"; then
+		die "unsupported GPU module: $module"
+	fi
+done
+case " $GPU_MODULE " in
+	*" auto "*)
+		[ "$GPU_MODULE" = auto ] || die "auto cannot be combined with explicit GPU modules"
+		;;
+	*" none "*)
+		[ "$GPU_MODULE" = none ] || die "none cannot be combined with explicit GPU modules"
+		;;
 esac
 
 if [ -n "$INSTALL_USER" ]; then
@@ -368,6 +428,48 @@ set_conf_value()
 	mv "$_set_conf_tmp" "$file"
 }
 
+set_conf_word_list()
+{
+	file=$1
+	key=$2
+	words=$3
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would set $key=\"$words\" in $file"
+		return 0
+	fi
+
+	ensure_parent "$file"
+	touch "$file"
+	existing=$(awk -v k="$key" '
+		{
+			s = $0
+			sub(/^[ \t]*/, "", s)
+			if (index(s, k "=") == 1) {
+				sub(k "=", "", s)
+				gsub(/^"/, "", s)
+				gsub(/"$/, "", s)
+				print s
+				exit
+			}
+		}
+	' "$file")
+
+	combined=$(printf '%s\n%s\n' "$existing" "$words" |
+		awk '
+			{
+				for (i = 1; i <= NF; i++) {
+					if (!seen[$i]++) {
+						if (out != "") out = out " "
+						out = out $i
+					}
+				}
+			}
+			END { print out }
+		')
+	set_conf_value "$file" "$key" "$combined"
+}
+
 run_cmd()
 {
 	if [ "$DRY_RUN" -eq 1 ]; then
@@ -390,9 +492,71 @@ run_in_target()
 	fi
 }
 
+pciconf_display_devices()
+{
+	is_freebsd || return 1
+	pciconf -lv 2>/dev/null |
+		awk '
+			BEGIN { RS = ""; ORS = "\n\n" }
+			/class[[:space:]]*=[[:space:]]*display/ || /class=0x03/ { print }
+		'
+}
+
+detect_gpu_modules()
+{
+	devices=$(pciconf_display_devices || true)
+	[ -n "$devices" ] || return 0
+
+	modules=
+	if printf '%s\n' "$devices" | grep -F "Intel Corporation" >/dev/null 2>&1; then
+		modules="$modules i915kms"
+	fi
+	if printf '%s\n' "$devices" | grep -E "Advanced Micro Devices|AMD/ATI|ATI Technologies" >/dev/null 2>&1; then
+		modules="$modules amdgpu"
+	fi
+	if printf '%s\n' "$devices" | grep -F "NVIDIA Corporation" >/dev/null 2>&1; then
+		modules="$modules nvidia-drm"
+	fi
+
+	normalize_gpu_modules "$modules"
+}
+
+selected_gpu_modules()
+{
+	case "$GPU_MODULE" in
+		auto)
+			detect_gpu_modules
+			;;
+		none)
+			printf '\n'
+			;;
+		*)
+			printf '%s\n' "$GPU_MODULE"
+			;;
+	esac
+}
+
+gpu_package_manifest()
+{
+	modules=$(selected_gpu_modules || true)
+	for module in $modules; do
+		case "$module" in
+			i915kms|amdgpu|radeonkms)
+				printf '%s\n' drm-kmod
+				;;
+			nvidia-drm)
+				printf '%s\n' nvidia-drm-kmod
+				;;
+			nvidia-modeset|nvidia)
+				printf '%s\n' nvidia-driver
+				;;
+		esac
+	done | awk 'NF && !seen[$0]++'
+}
+
 package_manifest()
 {
-	printf '%s\n%s\n%s\n' "$CORE_PACKAGES" "$DESKTOP_PACKAGES" "$BROWSER_PACKAGES" |
+	printf '%s\n%s\n%s\n%s\n' "$CORE_PACKAGES" "$DESKTOP_PACKAGES" "$BROWSER_PACKAGES" "$(gpu_package_manifest)" |
 		awk 'NF { print $1 }'
 }
 
@@ -589,6 +753,33 @@ configure_rc_conf()
 	else
 		set_conf_value "$rc" dumpdev NO
 	fi
+}
+
+configure_gpu_driver()
+{
+	modules=$(selected_gpu_modules || true)
+	if [ -z "$modules" ]; then
+		if [ "$GPU_MODULE" = auto ]; then
+			warn "could not auto-detect a GPU module; rerun with --gpu-module i915kms, amdgpu, radeonkms, or nvidia-drm if graphics does not start"
+		fi
+		return 0
+	fi
+
+	case " $modules " in
+		*" amdgpu "*)
+			if [ "$GPU_MODULE" = auto ]; then
+				warn "auto-selected amdgpu for AMD graphics; use --gpu-module radeonkms for older pre-HD7000/Tahiti Radeon hardware"
+			fi
+			;;
+	esac
+
+	set_conf_word_list "$(target_path /etc/rc.conf)" kld_list "$modules"
+
+	case " $modules " in
+		*" nvidia-drm "*)
+			set_conf_value "$(target_path /boot/loader.conf)" hw.nvidiadrm.modeset 1
+			;;
+	esac
 }
 
 configure_hardening()
@@ -1309,15 +1500,20 @@ write_bsdinstall_config()
 	disk=$2
 	install_args="--from-installer --pkg-branch $PKG_BRANCH"
 	[ -n "$INSTALL_USER" ] && install_args="$install_args --user $INSTALL_USER"
+	if [ "$GPU_MODULE" != auto ]; then
+		gpu_arg=$(printf '%s\n' "$GPU_MODULE" | tr ' ' ',')
+		install_args="$install_args --gpu-module $gpu_arg"
+	fi
 	[ "$SKIP_NOCTALIA" -eq 1 ] && install_args="$install_args --skip-noctalia"
+	[ "$SKIP_ZED" -eq 1 ] && install_args="$install_args --skip-zed"
 	[ "$ENABLE_CRASH_DUMPS" -eq 1 ] && install_args="$install_args --enable-crash-dumps"
 
 	cat >"$cfg" <<EOF
 DISTRIBUTIONS="kernel.txz base.txz"
-ZFSBOOT_DISKS="$disk"
-ZFSBOOT_VDEV_TYPE="stripe"
-ZFSBOOT_SWAP_SIZE="2g"
-ZFSBOOT_CONFIRM_LAYOUT="1"
+export ZFSBOOT_DISKS="$disk"
+export ZFSBOOT_VDEV_TYPE="stripe"
+export ZFSBOOT_SWAP_SIZE="2g"
+export ZFSBOOT_CONFIRM_LAYOUT="1"
 
 #!/bin/sh
 set -eu
@@ -1371,6 +1567,7 @@ main()
 
 	install_packages
 	configure_rc_conf
+	configure_gpu_driver
 	configure_hardening
 	configure_mounts
 	configure_doas_and_editor
