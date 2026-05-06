@@ -20,7 +20,6 @@ git
 gh
 jq
 yq
-sudo
 doas
 nano
 fish
@@ -75,8 +74,6 @@ fcitx5-gtk4
 fcitx5-qt5
 fcitx5-qt6
 ja-fcitx5-anthy
-pipewire
-wireplumber
 wl-clipboard
 grim
 slurp
@@ -100,7 +97,6 @@ vlc
 obs-studio
 libreoffice
 signal-desktop
-vesktop
 qbittorrent
 syncthing
 xdg-user-dirs
@@ -124,8 +120,7 @@ BROWSER_PACKAGES='
 firefox
 librewolf
 chromium
-zed
-vscode
+gram-text-editor
 '
 
 NOCTALIA_PLUGINS='
@@ -587,12 +582,6 @@ configure_rc_conf()
 	else
 		set_conf_value "$rc" dumpdev NO
 	fi
-
-	for svc in pipewire wireplumber pipewire_pulse; do
-		if [ "$DRY_RUN" -eq 1 ] || [ -x "$(target_path /usr/local/etc/rc.d/$svc)" ]; then
-			set_conf_value "$rc" "${svc}_enable" YES
-		fi
-	done
 }
 
 configure_hardening()
@@ -627,7 +616,7 @@ configure_doas_and_editor()
 	doas_file=$(target_path /usr/local/etc/doas.conf)
 	profile_file=$(target_path /usr/local/etc/profile.d/freebsd-scripts.sh)
 
-	write_file "$doas_file" 0644 <<'EOF'
+	write_file "$doas_file" 0600 <<'EOF'
 permit persist :wheel
 EOF
 
