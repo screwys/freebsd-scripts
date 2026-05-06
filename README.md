@@ -14,4 +14,4 @@ fetch -o - https://raw.githubusercontent.com/screwys/freebsd-scripts/main/instal
 
 The guided installer requires an explicit disk choice before ZFS setup.
 
-Installs and configures doas for the desktop user, plus fish, dev tools, GNOME/GDM, Niri, Xwayland Satellite, Quickshell with staged Noctalia files, Ghostty, browsers, a Zed-style editor, media apps, KDE utilities, fcitx5 Japanese input, screenshot/clipboard tools, fonts, portals, GPU firmware, and desktop hardening defaults.
+Installs and configures doas for the desktop user, plus fish, dev tools, GNOME/GDM, Niri, Xwayland Satellite, Quickshell with staged Noctalia files, Ghostty, browsers, a best-effort Zed source build, Vesktop, media apps, KDE utilities, fcitx5 Japanese input, screenshot/clipboard tools, fonts, portals, GPU firmware, and desktop hardening defaults.

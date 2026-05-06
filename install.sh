@@ -11,7 +11,9 @@ VALIDATE_ONLY=0
 BSDINSTALL_GUIDED=0
 FROM_INSTALLER=0
 SKIP_NOCTALIA=0
+SKIP_ZED=0
 ENABLE_CRASH_DUMPS=0
+ZED_REPO=${ZED_REPO:-https://github.com/zed-industries/zed.git}
 
 CORE_PACKAGES='
 ca_root_nss
@@ -49,6 +51,17 @@ node
 npm
 python3
 py311-pip
+'
+
+ZED_BUILD_PACKAGES='
+bash
+cmake
+gcc
+llvm
+protobuf
+rustup-init
+libX11
+alsa-lib
 '
 
 DESKTOP_PACKAGES='
@@ -97,6 +110,7 @@ vlc
 obs-studio
 libreoffice
 signal-desktop
+vesktop
 qbittorrent
 syncthing
 xdg-user-dirs
@@ -120,7 +134,6 @@ BROWSER_PACKAGES='
 firefox
 librewolf
 chromium
-gram-text-editor
 '
 
 NOCTALIA_PLUGINS='
@@ -169,6 +182,7 @@ options:
   --dry-run                print actions without changing the system
   --validate               validate generated policy JSON and manifests
   --skip-noctalia          skip Noctalia best-effort staging
+  --skip-zed               skip Zed source build
   --enable-crash-dumps     keep dumpdev=AUTO instead of disabling dumps
   --help                   show this help
 EOF
@@ -221,6 +235,10 @@ while [ $# -gt 0 ]; do
 			;;
 		--skip-noctalia)
 			SKIP_NOCTALIA=1
+			shift
+			;;
+		--skip-zed)
+			SKIP_ZED=1
 			shift
 			;;
 		--enable-crash-dumps)
@@ -383,9 +401,29 @@ run_in_target()
 	fi
 }
 
+run_as_user()
+{
+	user=$1
+	shift
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would run as $user in $TARGET: $*"
+		return 0
+	fi
+	if [ "$TARGET" = "/" ]; then
+		su "$user" -c "$*"
+	else
+		chroot "$TARGET" /usr/bin/su "$user" -c "$*"
+	fi
+}
+
 package_manifest()
 {
-	printf '%s\n%s\n%s\n' "$CORE_PACKAGES" "$DESKTOP_PACKAGES" "$BROWSER_PACKAGES" |
+	{
+		printf '%s\n%s\n%s\n' "$CORE_PACKAGES" "$DESKTOP_PACKAGES" "$BROWSER_PACKAGES"
+		if [ "$SKIP_ZED" -eq 0 ]; then
+			printf '%s\n' "$ZED_BUILD_PACKAGES"
+		fi
+	} |
 		awk 'NF { print $1 }'
 }
 
@@ -1005,6 +1043,108 @@ EOF
 	warn "FreeBSD quickshell is upstream quickshell, not noctalia-qs; GNOME remains the fallback session"
 }
 
+write_zed_installer()
+{
+	write_file "$(target_path /usr/local/bin/install-zed-freebsd)" 0755 <<'EOF'
+#!/bin/sh
+
+set -eu
+
+repo=${ZED_REPO:-https://github.com/zed-industries/zed.git}
+src=${ZED_SRC:-$HOME/src/zed}
+
+artifact_path()
+{
+	target_dir=${CARGO_TARGET_DIR:-target}
+	case "$target_dir" in
+		/*) printf '%s/release/%s\n' "$target_dir" "$1" ;;
+		*) printf '%s/%s/release/%s\n' "$src" "$target_dir" "$1" ;;
+	esac
+}
+
+if [ ! -d "$src/.git" ]; then
+	mkdir -p "${src%/*}"
+	git clone --depth 1 "$repo" "$src"
+else
+	git -C "$src" pull --ff-only
+fi
+
+if ! command -v rustup >/dev/null 2>&1; then
+	if command -v rustup-init >/dev/null 2>&1; then
+		rustup-init -y --no-modify-path
+	else
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+	fi
+fi
+
+if [ -f "$HOME/.cargo/env" ]; then
+	. "$HOME/.cargo/env"
+fi
+
+cd "$src"
+cargo build --release -p zed -p cli
+
+cli_bin=$(artifact_path cli)
+zed_bin=$(artifact_path zed)
+
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/512x512/apps"
+if [ -x "$cli_bin" ]; then
+	ln -sf "$cli_bin" "$HOME/.local/bin/zed"
+elif [ -x "$zed_bin" ]; then
+	ln -sf "$zed_bin" "$HOME/.local/bin/zed"
+else
+	printf '%s\n' "zed build completed, but no cli binary was found" >&2
+	exit 1
+fi
+
+if [ -f "$src/crates/zed/resources/app-icon.png" ]; then
+	cp -f "$src/crates/zed/resources/app-icon.png" "$HOME/.local/share/icons/hicolor/512x512/apps/zed.png"
+fi
+
+cat >"$HOME/.local/share/applications/dev.zed.Zed.Source.desktop" <<EOF_DESKTOP
+[Desktop Entry]
+Name=Zed
+Comment=Code editor
+Exec=$HOME/.local/bin/zed %U
+Icon=$HOME/.local/share/icons/hicolor/512x512/apps/zed.png
+Type=Application
+Terminal=false
+Categories=Utility;TextEditor;Development;IDE;
+MimeType=text/plain;
+EOF_DESKTOP
+
+printf '%s\n' "Zed source build installed at $HOME/.local/bin/zed"
+EOF
+}
+
+install_zed_from_source()
+{
+	[ "$SKIP_ZED" -eq 0 ] || return 0
+
+	write_zed_installer
+
+	[ -n "$INSTALL_USER" ] || {
+		warn "no desktop user found; installed /usr/local/bin/install-zed-freebsd but skipped the Zed build"
+		return 0
+	}
+
+	if ! user_record "$INSTALL_USER" >/dev/null 2>&1; then
+		warn "skipping Zed build; $INSTALL_USER does not exist"
+		return 0
+	fi
+
+	if [ "$DRY_RUN" -eq 0 ] && ! is_freebsd; then
+		warn "skipping Zed build; FreeBSD source build must run on FreeBSD"
+		return 0
+	fi
+
+	if run_as_user "$INSTALL_USER" env ZED_REPO="$ZED_REPO" /usr/local/bin/install-zed-freebsd; then
+		log "Zed source build installed for $INSTALL_USER"
+	else
+		warn "Zed source build failed; rerun /usr/local/bin/install-zed-freebsd as $INSTALL_USER"
+	fi
+}
+
 write_firefox_policy()
 {
 	path=$1
@@ -1314,6 +1454,7 @@ main()
 	write_browser_policies
 	ensure_user
 	configure_user_files
+	install_zed_from_source
 	stage_noctalia
 
 	log "done"
