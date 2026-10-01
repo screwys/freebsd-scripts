@@ -21,6 +21,6 @@ fetch https://raw.githubusercontent.com/screwys/freebsd-scripts/main/install.sh
 sh install.sh --tui --user user_name
 ```
 
-Installs and configures doas for the desktop user, plus fish, Starship, Yazi, Rust/Go and other dev tools, Neovim with LazyVim, GNOME/GDM, Niri, Xwayland Satellite, native Noctalia v5, Ghostty, browsers, Zed, Vesktop, GStreamer and media apps, KDE utilities, fcitx5 Japanese input, screenshot/clipboard tools, fonts, portals, GPU firmware, and desktop hardening defaults.
+Installs and configures doas for the desktop user, plus fish, Starship, Yazi, Rust/Go and other dev tools, Neovim with LazyVim, GNOME/GDM, Niri, Xwayland Satellite, native Noctalia v5, Ghostty, Firefox, LibreWolf, Chromium, Zed, Vesktop, GStreamer and media apps, KDE utilities, fcitx5 Japanese input, screenshot/clipboard tools, fonts, portals, GPU firmware, and desktop hardening defaults.
 
-Noctalia, Chromium, Signal Desktop, and Vesktop build from source.
+Noctalia, Signal Desktop, and Vesktop build from source.

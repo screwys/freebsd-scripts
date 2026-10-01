@@ -133,6 +133,7 @@ wtype
 BROWSER_PACKAGES='
 firefox
 librewolf
+chromium
 '
 
 MEDIA_PACKAGES='
@@ -353,7 +354,7 @@ select_components()
 		dev "Compilers, language servers, Android tools" on \
 		gnome "GNOME + Ghostty" on \
 		niri "Niri + Noctalia v5 + Ghostty" on \
-		browsers "Firefox, LibreWolf, Chromium" on \
+		browsers "Firefox, LibreWolf, Chromium binaries" on \
 		zed "Zed editor" on \
 		media "Media and recording apps" on \
 		kde "KDE utilities" on \
@@ -760,26 +761,20 @@ install_packages()
 	fi
 }
 
-install_app_ports()
+install_ports()
 {
-	app_ports=
-	if selected browsers; then
-		app_ports="www/chromium"
-	fi
-	if selected apps; then
-		app_ports="$app_ports net-im/signal-desktop net-im/vesktop"
-	fi
-	[ -n "$app_ports" ] || return 0
+	ports_ref=$1
+	app_ports=$2
 	if [ "$DRY_RUN" -eq 1 ]; then
-		log "would build and install $app_ports from FreeBSD ports revision $APP_PORTS_REF"
+		log "would build and install $app_ports from FreeBSD ports revision $ports_ref"
 		return 0
 	fi
 
-	set -- /bin/sh -s -- "$APP_PORTS_REF" "$app_ports"
+	set -- /bin/sh -s -- "$ports_ref" "$app_ports"
 	if [ "$TARGET" != "/" ]; then
 		set -- chroot "$TARGET" "$@"
 	fi
-	try_install "FreeBSD app ports" "$@" <<'EOF'
+	try_install "FreeBSD ports: $app_ports" "$@" <<'EOF'
 set -eu
 set -f
 ref=$1
@@ -1461,62 +1456,7 @@ write_browser_policies()
 	write_firefox_policy "$(target_path /usr/local/lib/firefox/distribution/policies.json)"
 	write_firefox_policy "$(target_path /usr/local/lib/librewolf/distribution/policies.json)"
 	write_firefox_policy "$(target_path /usr/local/share/librewolf/distribution/policies.json)"
-
-	write_file "$(target_path /usr/local/etc/chromium/policies/managed/freebsd-scripts-privacy.json)" 0644 <<'EOF'
-{
-  "AlternateErrorPagesEnabled": false,
-  "AutofillAddressEnabled": false,
-  "AutofillCreditCardEnabled": false,
-  "BackgroundModeEnabled": false,
-  "BlockThirdPartyCookies": true,
-  "BrowserSignin": 0,
-  "CloudReportingEnabled": false,
-  "DefaultBrowserSettingEnabled": false,
-  "DnsOverHttpsMode": "automatic",
-  "ExtensionSettings": {
-    "ddkjiahejlhfcafbddmgiahcphecmpfh": {
-      "installation_mode": "normal_installed",
-      "update_url": "https://clients2.google.com/service/update2/crx"
-    },
-    "ldpochfccmkkmhdbclfhpagapcfdljkj": {
-      "installation_mode": "normal_installed",
-      "update_url": "https://clients2.google.com/service/update2/crx"
-    },
-    "ghmbeldphafepmbegfdlkpapadhbakde": {
-      "installation_mode": "normal_installed",
-      "update_url": "https://clients2.google.com/service/update2/crx"
-    },
-    "jplgfhpmjnbigmhklmmbgecoobifkmpa": {
-      "installation_mode": "normal_installed",
-      "update_url": "https://clients2.google.com/service/update2/crx"
-    }
-  },
-  "MetricsReportingEnabled": false,
-  "NetworkPredictionOptions": 2,
-  "PasswordManagerEnabled": false,
-  "PrivacySandboxAdMeasurementEnabled": false,
-  "PrivacySandboxAdTopicsEnabled": false,
-  "PrivacySandboxPromptEnabled": false,
-  "PrivacySandboxSiteEnabledAdsEnabled": false,
-  "PromotionalTabsEnabled": false,
-  "SafeBrowsingExtendedReportingEnabled": false,
-  "SearchSuggestEnabled": false,
-  "SpellCheckServiceEnabled": false,
-  "SyncDisabled": true,
-  "UrlKeyedAnonymizedDataCollectionEnabled": false
 }
-EOF
-
-	write_file "$(target_path /usr/local/etc/chromium/policies/recommended/freebsd-scripts-search.json)" 0644 <<'EOF'
-{
-  "DefaultSearchProviderEnabled": true,
-  "DefaultSearchProviderKeyword": "duckduckgo.com",
-  "DefaultSearchProviderName": "DuckDuckGo",
-  "DefaultSearchProviderSearchURL": "https://duckduckgo.com/?q={searchTerms}"
-}
-EOF
-}
-
 validate_json_files()
 {
 	root=$1
@@ -1692,7 +1632,9 @@ main()
 	need_root
 
 	install_packages
-	install_app_ports
+	if selected apps; then
+		install_ports "$APP_PORTS_REF" "net-im/signal-desktop net-im/vesktop"
+	fi
 	install_noctalia
 	configure_rc_conf
 	configure_gpu_driver
