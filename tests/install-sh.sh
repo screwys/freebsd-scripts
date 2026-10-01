@@ -67,14 +67,14 @@ esac
 EOF
 chmod +x "$fakebin/pciconf"
 
-out=$(run_script --bsdinstall-guided --user screwy --dry-run)
+out=$(run_script --guided --user screwy --dry-run)
 assert_contains "$out" 'export ZFSBOOT_DISKS="DISK_YOU_CONFIRM"'
 assert_contains "$out" 'export ZFSBOOT_VDEV_TYPE="stripe"'
 assert_contains "$out" 'export ZFSBOOT_SWAP_SIZE="2g"'
 assert_contains "$out" 'export ZFSBOOT_CONFIRM_LAYOUT="1"'
 
 out=$(run_script -g -u screwy -n)
-assert_contains "$out" 'sh /tmp/freebsd-install.sh --from-installer --pkg-branch latest --user screwy'
+assert_contains "$out" 'sh /tmp/freebsd-install.sh --user screwy'
 
 out=$(
 	cd "$ROOT"

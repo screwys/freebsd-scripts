@@ -7,25 +7,32 @@ TARGET=/
 INSTALL_USER=${INSTALL_USER:-}
 PKG_BRANCH=${PKG_BRANCH:-latest}
 GPU_MODULE=${GPU_MODULE:-auto}
+COMPONENTS=${INSTALL_COMPONENTS-'tools dev gnome niri browsers zed media kde apps japanese gpu'}
 DRY_RUN=0
 VALIDATE_ONLY=0
 BSDINSTALL_GUIDED=0
-FROM_INSTALLER=0
-SKIP_NOCTALIA=0
-SKIP_ZED=0
-ENABLE_CRASH_DUMPS=0
-ZED_PORT_RELEASE_API=${ZED_PORT_RELEASE_API:-https://api.github.com/repos/tagattie/FreeBSD-Zed/releases/latest}
+TUI=0
+EDITOR_CMD=nano
+FAILED_INSTALLS=
+# Native FreeBSD support lives on upstream's feat/freebsd branch.
+NOCTALIA_REF=77552410fd1ca63811efc8960f11cf4765e0c9b1
+# This snapshot still includes Vesktop and Electron 40.
+APP_PORTS_REF=596ce5964e00f1b40fb5bee30beea9268477a591
+LAZYVIM_REF=803bc181d7c0d6d5eeba9274d9be49b287294d99
 
-CORE_PACKAGES='
+BASE_PACKAGES='
 ca_root_nss
 curl
 git
-gh
 jq
-yq
 doas
 nano
 fish
+'
+
+CORE_PACKAGES='
+gh
+yq
 fastfetch
 just
 ripgrep
@@ -38,8 +45,12 @@ wget
 direnv
 neovim
 lazygit
+tree-sitter-cli
+unzip
 socat
 zoxide
+starship
+yazi
 btop
 duf
 dust
@@ -51,58 +62,45 @@ uv
 node
 npm
 python3
-py311-pip
+py312-pip
+'
+
+DEV_PACKAGES='
+gdb
+ruff
+py312-pipx
+android-tools
+openjdk25
+go
+rust
+gcc
+gmake
+cmake
+meson
+ninja
+pkgconf
+talloc
+openssl
+freeglut
+patch
+lua-language-server
+stylua
+gopls
+rust-analyzer
 '
 
 DESKTOP_PACKAGES='
 xorg
-gnome-lite
 gdm
-niri
-xwayland-satellite
-quickshell
 ghostty
 gnome-keyring
 polkit
 nautilus
-showtime
 xdg-desktop-portal
 xdg-desktop-portal-gnome
 xdg-desktop-portal-gtk
 qt6ct
-fcitx5
-fcitx5-configtool
-fcitx5-gtk3
-fcitx5-gtk4
-fcitx5-qt5
-fcitx5-qt6
-ja-fcitx5-anthy
-wl-clipboard
-grim
-slurp
-wf-recorder
-cliphist
-wtype
 libnotify
-ImageMagick7
-tesseract
-kdeconnect-kde
-okular
-gwenview
-dolphin
-kate
-konsole
-ark
-kcalc
-plasma6-xdg-desktop-portal-kde
-mpv
-vlc
-obs-studio
-libreoffice
-signal-desktop
-vesktop
-qbittorrent
-syncthing
 xdg-user-dirs
 xdg-utils
 shared-mime-info
@@ -116,29 +114,96 @@ noto-jp
 noto-sans
 '
 
-KMOD_PACKAGES=''
+NIRI_PACKAGES='
+niri
+xwayland-satellite
+pipewire
+wireplumber
+upower
+bash
+freedesktop-sound-theme
+wl-clipboard
+grim
+slurp
+wf-recorder
+cliphist
+wtype
+'
 
 BROWSER_PACKAGES='
 firefox
 librewolf
-chromium
 '
 
-NOCTALIA_PLUGINS='
-clipper
-file-search
-kaomoji-provider
-niri-animation-picker
-niri-overview-launcher
-noctalia-calculator
-notes-scratchpad
-polkit-agent
-pomodoro
-screen-recorder
-screen-toolkit
-timer
-todo
-weather-indicator
+MEDIA_PACKAGES='
+showtime
+mpv
+vlc
+obs-studio
+ImageMagick7
+tesseract
+ffmpeg
+gstreamer1
+gstreamer1-plugins-all
+'
+
+KDE_PACKAGES='
+kdeconnect-kde
+okular
+gwenview
+dolphin
+kate
+konsole
+ark
+kcalc
+plasma6-xdg-desktop-portal-kde
+'
+
+APP_PACKAGES='
+libreoffice
+qbittorrent
+syncthing
+'
+
+JAPANESE_PACKAGES='
+fcitx5
+fcitx5-configtool
+fcitx5-gtk3
+fcitx5-gtk4
+fcitx5-qt5
+fcitx5-qt6
+ja-fcitx5-anthy
+'
+
+NOCTALIA_BUILD_PACKAGES='
+meson
+ninja
+pkgconf
+wayland
+wayland-protocols
+libepoxy
+freetype2
+fontconfig
+cairo
+pango
+harfbuzz
+librsvg2-rust
+libxkbcommon
+glib
+libsecret
+libsodium
+sdbus-cpp
+libqalculate
+libxml2
+md4c
+nlohmann-json
+tomlplusplus
+libical
+libinotify
+stb
+webp
+libjxl
+libsndfile
 '
 
 log()
@@ -162,20 +227,16 @@ usage()
 	cat <<'EOF'
 usage: sh install.sh [options]
 
+With no options, install the full setup.
+
 options:
-  -u, --user NAME          desktop user to create/configure
-  -g, --guided             create a temporary bsdinstall script and run it
-      --bsdinstall-guided  same as --guided
-  --pkg-branch NAME        FreeBSD pkg branch, default: latest
-  --gpu-module MODULE      GPU module: auto, none, i915kms, amdgpu, radeonkms, nvidia-drm
-  --no-gpu                 skip GPU module configuration
-  --target PATH            configure a mounted root, default: /
-  -n, --dry-run            print actions without changing the system
-  --validate               validate generated policy JSON and manifests
-  --skip-noctalia          skip Noctalia best-effort staging
-  --skip-zed               skip Zed port package install
-  --enable-crash-dumps     keep dumpdev=AUTO instead of disabling dumps
-  --help                   show this help
+  -u, --user NAME       desktop user to create/configure
+  -g, --guided          install FreeBSD from the ISO shell
+      --tui             choose components with [X] checkboxes
+      --target PATH     configure a mounted root, default: /
+  -n, --dry-run         print actions without changing the system
+      --validate        check policy JSON and package manifests
+  -h, --help            show this help
 EOF
 }
 
@@ -186,44 +247,18 @@ while [ $# -gt 0 ]; do
 			INSTALL_USER=$2
 			shift 2
 			;;
-		--user=*)
-			INSTALL_USER=${1#*=}
-			shift
-			;;
-		-g|--guided|--bsdinstall-guided)
+		-g|--guided)
 			BSDINSTALL_GUIDED=1
 			shift
 			;;
-		--pkg-branch)
-			[ $# -ge 2 ] || die "--pkg-branch needs a value"
-			PKG_BRANCH=$2
-			shift 2
-			;;
-		--pkg-branch=*)
-			PKG_BRANCH=${1#*=}
-			shift
-			;;
-		--gpu-module|--gpu)
-			[ $# -ge 2 ] || die "--gpu-module needs a value"
-			GPU_MODULE=$2
-			shift 2
-			;;
-		--gpu-module=*|--gpu=*)
-			GPU_MODULE=${1#*=}
-			shift
-			;;
-		--no-gpu)
-			GPU_MODULE=none
+		--tui)
+			TUI=1
 			shift
 			;;
 		--target)
 			[ $# -ge 2 ] || die "--target needs a value"
 			TARGET=$2
 			shift 2
-			;;
-		--target=*)
-			TARGET=${1#*=}
-			shift
 			;;
 		-n|--dry-run)
 			DRY_RUN=1
@@ -233,39 +268,18 @@ while [ $# -gt 0 ]; do
 			VALIDATE_ONLY=1
 			shift
 			;;
-		--from-installer)
-			FROM_INSTALLER=1
-			shift
-			;;
-		--skip-noctalia)
-			SKIP_NOCTALIA=1
-			shift
-			;;
-		--skip-zed)
-			SKIP_ZED=1
-			shift
-			;;
-		--enable-crash-dumps)
-			ENABLE_CRASH_DUMPS=1
-			shift
-			;;
 		--help|-h)
 			usage
 			exit 0
-			;;
-		--)
-			shift
-			break
 			;;
 		*)
 			die "unknown option: $1"
 			;;
 	esac
 done
-
 case "$PKG_BRANCH" in
 	latest|quarterly) ;;
-	*) die "--pkg-branch must be latest or quarterly" ;;
+	*) die "PKG_BRANCH must be latest or quarterly" ;;
 esac
 
 valid_gpu_module()
@@ -298,7 +312,7 @@ normalize_gpu_modules()
 }
 
 GPU_MODULE=$(normalize_gpu_modules "$GPU_MODULE")
-[ -n "$GPU_MODULE" ] || die "--gpu-module needs a value"
+[ -n "$GPU_MODULE" ] || die "GPU_MODULE needs a value"
 for module in $GPU_MODULE; do
 	if ! valid_gpu_module "$module"; then
 		die "unsupported GPU module: $module"
@@ -313,19 +327,65 @@ case " $GPU_MODULE " in
 		;;
 esac
 
-if [ -n "$INSTALL_USER" ]; then
-	case "$INSTALL_USER" in
-		*[!A-Za-z0-9._-]*)
-			die "--user contains unsupported characters"
-			;;
-	esac
-fi
-
 case "$TARGET" in
 	/) ;;
 	/*) TARGET=${TARGET%/} ;;
 	*) die "--target must be an absolute path" ;;
 esac
+
+selected()
+{
+	case " $COMPONENTS " in
+		*" $1 "*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+select_components()
+{
+	command -v bsddialog >/dev/null 2>&1 || die "--tui needs FreeBSD's bsddialog"
+	tty -s 2>/dev/null </dev/tty || die "--tui needs an interactive terminal"
+	if choices=$(bsddialog --clear --title "FreeBSD desktop setup" \
+		--output-fd 3 --separate-output \
+		--checklist "Space toggles [X]. Enter installs the selected groups.\nBasic tools are always installed." \
+		0 0 0 \
+		tools "CLI tools + Neovim + LazyVim" on \
+		dev "Compilers, language servers, Android tools" on \
+		gnome "GNOME + Ghostty" on \
+		niri "Niri + Noctalia v5 + Ghostty" on \
+		browsers "Firefox, LibreWolf, Chromium" on \
+		zed "Zed editor" on \
+		media "Media and recording apps" on \
+		kde "KDE utilities" on \
+		apps "Office, messaging, and file sharing" on \
+		japanese "Japanese input" on \
+		gpu "GPU drivers and firmware" on \
+		3>&1 1>/dev/tty 2>/dev/tty </dev/tty); then
+		COMPONENTS=$(printf '%s\n' "$choices" | tr '\n' ' ')
+	else
+		status=$?
+		case "$status" in
+			1|5) log "cancelled"; exit 0 ;;
+			*) die "component selection failed" ;;
+		esac
+	fi
+}
+
+resolve_install_user()
+{
+	[ -n "$INSTALL_USER" ] || INSTALL_USER=$(discover_user || true)
+	if [ -z "$INSTALL_USER" ]; then
+		if [ "$DRY_RUN" -eq 1 ]; then
+			INSTALL_USER=desktop
+		else
+			printf '%s' "desktop user: " >/dev/tty || die "pass --user NAME"
+			IFS= read -r INSTALL_USER </dev/tty || die "could not read desktop user"
+		fi
+	fi
+	case "$INSTALL_USER" in
+		''|*[!A-Za-z0-9._-]*) die "--user needs a valid username" ;;
+	esac
+}
 
 is_freebsd()
 {
@@ -470,15 +530,6 @@ set_conf_word_list()
 	set_conf_value "$file" "$key" "$combined"
 }
 
-run_cmd()
-{
-	if [ "$DRY_RUN" -eq 1 ]; then
-		log "would run: $*"
-		return 0
-	fi
-	"$@"
-}
-
 run_in_target()
 {
 	if [ "$DRY_RUN" -eq 1 ]; then
@@ -490,6 +541,25 @@ run_in_target()
 	else
 		chroot "$TARGET" /bin/sh -c "$*"
 	fi
+}
+
+try_install()
+{
+	install_label=$1
+	shift
+	if "$@"; then
+		return 0
+	else
+		install_status=$?
+		warn "$install_label failed with exit $install_status; continuing"
+		if [ -n "$FAILED_INSTALLS" ]; then
+			FAILED_INSTALLS="$FAILED_INSTALLS
+  $install_label"
+		else
+			FAILED_INSTALLS="  $install_label"
+		fi
+	fi
+	return 0
 }
 
 pciconf_display_devices()
@@ -556,20 +626,28 @@ gpu_package_manifest()
 
 package_manifest()
 {
-	printf '%s\n%s\n%s\n%s\n' "$CORE_PACKAGES" "$DESKTOP_PACKAGES" "$BROWSER_PACKAGES" "$(gpu_package_manifest)" |
-		awk 'NF { print $1 }'
-}
-
-kmod_manifest()
-{
-	printf '%s\n' "$KMOD_PACKAGES" |
-		awk 'NF { print $1 }'
-}
-
-all_package_manifest()
-{
-	printf '%s\n%s\n' "$(package_manifest)" "$(kmod_manifest)" |
-		awk 'NF { print $1 }'
+	{
+		printf '%s\n' "$BASE_PACKAGES"
+		if selected gnome || selected niri; then
+			printf '%s\n' "$DESKTOP_PACKAGES"
+		fi
+		for component in $COMPONENTS; do
+			case "$component" in
+				tools) printf '%s\n' "$CORE_PACKAGES" ;;
+				dev) printf '%s\n' "$DEV_PACKAGES" ;;
+				gnome) printf '%s\n' gnome-lite gnome-control-center ;;
+				niri) printf '%s\n' "$NIRI_PACKAGES" ;;
+				browsers) printf '%s\n' "$BROWSER_PACKAGES" ;;
+				media) printf '%s\n' "$MEDIA_PACKAGES" ;;
+				kde) printf '%s\n' "$KDE_PACKAGES" ;;
+				apps) printf '%s\n' "$APP_PACKAGES" ;;
+				japanese) printf '%s\n' "$JAPANESE_PACKAGES" ;;
+				gpu) gpu_package_manifest ;;
+				zed) printf '%s\n' zed-editor ;;
+				*) die "unknown component: $component" ;;
+			esac
+		done
+	} | awk 'NF { print $1 }'
 }
 
 ensure_pkg_repo()
@@ -620,11 +698,11 @@ ensure_kmods_repo()
 {
 	repo_dir=$(target_path /usr/local/etc/pkg/repos)
 	repo_file=$(target_path /usr/local/etc/pkg/repos/kmods.conf)
-	flavor=$(kmods_flavor)
 	if [ "$DRY_RUN" -eq 1 ]; then
-		log "would set FreeBSD kmods pkg branch to $flavor"
+		log "would set FreeBSD kmods pkg branch to match $TARGET and $PKG_BRANCH"
 		return 0
 	fi
+	flavor=$(kmods_flavor)
 	mkdir -p "$repo_dir"
 	cat >"$repo_file" <<EOF
 FreeBSD-kmods: {
@@ -637,95 +715,96 @@ FreeBSD-kmods: {
 EOF
 }
 
-pkg_exists()
-{
-	pkg=$1
-	[ "$DRY_RUN" -eq 1 ] && return 0
-	if [ "$TARGET" = "/" ]; then
-		pkg search -q "^${pkg}$" >/dev/null 2>&1
-	else
-		chroot "$TARGET" /bin/sh -c "pkg search -q '^${pkg}$' >/dev/null 2>&1"
-	fi
-}
-
-pkg_exists_in_repo()
-{
-	repo=$1
-	pkg=$2
-	[ "$DRY_RUN" -eq 1 ] && return 0
-	if [ "$TARGET" = "/" ]; then
-		pkg search -r "$repo" -q "^${pkg}$" >/dev/null 2>&1
-	else
-		chroot "$TARGET" /bin/sh -c "pkg search -r '$repo' -q '^${pkg}$' >/dev/null 2>&1"
-	fi
-}
-
 install_gpu_firmware_kmods()
 {
 	if [ "$DRY_RUN" -eq 1 ]; then
-		log "would install available gpu-firmware-* kmods from FreeBSD-kmods"
+		log "would install gpu-firmware-* kmods from FreeBSD-kmods"
 		return 0
 	fi
 
-	run_in_target "
-firmware_pkgs=\$(pkg search -r FreeBSD-kmods -q '^gpu-firmware-.*-kmod-' | tr '\n' ' ')
-if [ -n \"\$firmware_pkgs\" ]; then
-	env ASSUME_ALWAYS_YES=yes pkg install -y -r FreeBSD-kmods \$firmware_pkgs
-else
-	printf '%s\n' 'warn: no gpu firmware kmod packages found on FreeBSD-kmods' >&2
-fi
+	try_install "GPU firmware" run_in_target "
+set -eu
+firmware_pkgs=\$(pkg search -r FreeBSD-kmods -q '^gpu-firmware-.*-kmod-')
+failed=0
+for firmware_pkg in \$firmware_pkgs; do
+	if env ASSUME_ALWAYS_YES=yes pkg install -y -r FreeBSD-kmods \"\$firmware_pkg\"; then
+		:
+	else
+		printf '%s\\n' \"warn: \$firmware_pkg failed; continuing\" >&2
+		failed=1
+	fi
+done
+exit \$failed
 "
 }
 
 install_packages()
 {
-	ensure_pkg_repo
-	ensure_kmods_repo
-
 	if ! is_freebsd && [ "$DRY_RUN" -eq 0 ]; then
 		die "package installation must run on FreeBSD"
 	fi
 
-	run_in_target "env ASSUME_ALWAYS_YES=yes pkg bootstrap -f"
-	run_in_target "env ASSUME_ALWAYS_YES=yes pkg update -f"
+	ensure_pkg_repo
+	if selected gpu; then
+		ensure_kmods_repo
+	fi
 
-	available=
-	skipped=
+	try_install "pkg bootstrap" run_in_target "env ASSUME_ALWAYS_YES=yes pkg bootstrap -f"
+	try_install "pkg update" run_in_target "env ASSUME_ALWAYS_YES=yes pkg update -f"
 	for pkg in $(package_manifest); do
-		if pkg_exists "$pkg"; then
-			available="$available $pkg"
-		else
-			skipped="$skipped $pkg"
-		fi
+		try_install "$pkg" run_in_target "env ASSUME_ALWAYS_YES=yes pkg install -y $pkg"
 	done
 
-	if [ -n "$available" ]; then
-		run_in_target "env ASSUME_ALWAYS_YES=yes pkg install -y $available"
+	if selected gpu; then
+		install_gpu_firmware_kmods
+	fi
+}
+
+install_app_ports()
+{
+	app_ports=
+	if selected browsers; then
+		app_ports="www/chromium"
+	fi
+	if selected apps; then
+		app_ports="$app_ports net-im/signal-desktop net-im/vesktop"
+	fi
+	[ -n "$app_ports" ] || return 0
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would build and install $app_ports from FreeBSD ports revision $APP_PORTS_REF"
+		return 0
 	fi
 
-	if [ -n "$skipped" ]; then
-		warn "packages not found on this pkg branch:$skipped"
+	set -- /bin/sh -s -- "$APP_PORTS_REF" "$app_ports"
+	if [ "$TARGET" != "/" ]; then
+		set -- chroot "$TARGET" "$@"
 	fi
-
-	kmod_available=
-	kmod_skipped=
-	for pkg in $(kmod_manifest); do
-		if pkg_exists_in_repo FreeBSD-kmods "$pkg"; then
-			kmod_available="$kmod_available $pkg"
-		else
-			kmod_skipped="$kmod_skipped $pkg"
-		fi
-	done
-
-	if [ -n "$kmod_available" ]; then
-		run_in_target "env ASSUME_ALWAYS_YES=yes pkg install -y -r FreeBSD-kmods $kmod_available"
+	try_install "FreeBSD app ports" "$@" <<'EOF'
+set -eu
+set -f
+ref=$1
+app_ports=$2
+build_root=$(mktemp -d)
+trap 'rm -rf "$build_root"' EXIT HUP INT TERM
+git init "$build_root/ports"
+git -C "$build_root/ports" remote add origin https://github.com/freebsd/freebsd-ports.git
+git -C "$build_root/ports" fetch --depth 1 origin "$ref"
+git -C "$build_root/ports" checkout --detach FETCH_HEAD
+failed_ports=
+for origin in $app_ports; do
+	if make -C "$build_root/ports/$origin" PORTSDIR="$build_root/ports" \
+		BATCH=yes USE_PACKAGE_DEPENDS=yes install clean; then
+		:
+	else
+		printf '%s\n' "warn: $origin failed; continuing" >&2
+		failed_ports="$failed_ports $origin"
 	fi
-
-	if [ -n "$kmod_skipped" ]; then
-		warn "kmod packages not found on this kmods branch:$kmod_skipped"
-	fi
-
-	install_gpu_firmware_kmods
+done
+if [ -n "$failed_ports" ]; then
+	printf '%s\n' "warn: failed app ports:$failed_ports" >&2
+	exit 1
+fi
+EOF
 }
 
 configure_rc_conf()
@@ -733,8 +812,13 @@ configure_rc_conf()
 	rc=$(target_path /etc/rc.conf)
 
 	set_conf_value "$rc" dbus_enable YES
-	set_conf_value "$rc" gdm_enable YES
-	set_conf_value "$rc" seatd_enable YES
+	if selected gnome || selected niri; then
+		set_conf_value "$rc" gdm_enable YES
+		set_conf_value "$rc" xdg_runtime_base_enable YES
+	fi
+	if selected niri; then
+		set_conf_value "$rc" seatd_enable YES
+	fi
 	set_conf_value "$rc" powerd_enable YES
 	set_conf_value "$rc" ntpd_enable YES
 	set_conf_value "$rc" ntpd_sync_on_start YES
@@ -746,21 +830,16 @@ configure_rc_conf()
 	set_conf_value "$rc" sendmail_submit_enable NO
 	set_conf_value "$rc" sendmail_outbound_enable NO
 	set_conf_value "$rc" sendmail_msp_queue_enable NO
-	set_conf_value "$rc" xdg_runtime_base_enable YES
-
-	if [ "$ENABLE_CRASH_DUMPS" -eq 1 ]; then
-		set_conf_value "$rc" dumpdev AUTO
-	else
-		set_conf_value "$rc" dumpdev NO
-	fi
+	set_conf_value "$rc" dumpdev NO
 }
 
 configure_gpu_driver()
 {
+	selected gpu || return 0
 	modules=$(selected_gpu_modules || true)
 	if [ -z "$modules" ]; then
 		if [ "$GPU_MODULE" = auto ]; then
-			warn "could not auto-detect a GPU module; rerun with --gpu-module i915kms, amdgpu, radeonkms, or nvidia-drm if graphics does not start"
+			warn "could not auto-detect a GPU module; set GPU_MODULE to choose a driver"
 		fi
 		return 0
 	fi
@@ -768,7 +847,7 @@ configure_gpu_driver()
 	case " $modules " in
 		*" amdgpu "*)
 			if [ "$GPU_MODULE" = auto ]; then
-				warn "auto-selected amdgpu for AMD graphics; use --gpu-module radeonkms for older pre-HD7000/Tahiti Radeon hardware"
+				warn "auto-selected amdgpu; set GPU_MODULE=radeonkms for older pre-HD7000/Tahiti Radeon hardware"
 			fi
 			;;
 	esac
@@ -818,9 +897,9 @@ configure_doas_and_editor()
 permit persist :wheel
 EOF
 
-	write_file "$profile_file" 0644 <<'EOF'
-export EDITOR=nano
-export VISUAL=nano
+	{
+		printf 'export EDITOR=%s\nexport VISUAL=%s\n' "$EDITOR_CMD" "$EDITOR_CMD"
+		cat <<'EOF'
 export PAGER=${PAGER:-less}
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
 	XDG_RUNTIME_DIR="/var/run/user/$(id -u)"
@@ -831,6 +910,7 @@ if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
 	chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 fi
 EOF
+	} | write_file "$profile_file" 0644
 }
 
 configure_xdg_runtime_rc()
@@ -875,15 +955,7 @@ export XDG_SESSION_TYPE=wayland
 export QT_QPA_PLATFORM=wayland
 export GDK_BACKEND=wayland,x11
 
-if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-	dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR
-fi
-
-if [ -x /usr/local/bin/niri-session ]; then
-	exec /usr/local/bin/niri-session
-fi
-
-exec /usr/local/bin/niri
+exec /usr/local/bin/niri --session
 EOF
 
 	write_file "$session_desktop" 0644 <<'EOF'
@@ -943,12 +1015,6 @@ existing_groups_csv()
 
 ensure_user()
 {
-	[ -n "$INSTALL_USER" ] || INSTALL_USER=$(discover_user || true)
-	[ -n "$INSTALL_USER" ] || {
-		warn "no desktop user found; pass --user NAME to create/configure one"
-		return 0
-	}
-
 	if user_record "$INSTALL_USER" >/dev/null 2>&1; then
 		log "configuring existing user $INSTALL_USER"
 	else
@@ -963,21 +1029,21 @@ ensure_user()
 		if [ "$DRY_RUN" -eq 0 ]; then
 			warn "set a password for $INSTALL_USER"
 			if [ "$TARGET" = "/" ]; then
-				passwd "$INSTALL_USER" || warn "password was not set for $INSTALL_USER"
+				passwd "$INSTALL_USER"
 			else
-				chroot "$TARGET" passwd "$INSTALL_USER" || warn "password was not set for $INSTALL_USER"
+				chroot "$TARGET" passwd "$INSTALL_USER"
 			fi
 		fi
 	fi
 
 	for group in wheel operator video webcamd seatd _seatd; do
 		if [ "$DRY_RUN" -eq 1 ] || group_exists "$group"; then
-			run_in_target "pw groupmod '$group' -m '$INSTALL_USER'" || true
+			run_in_target "pw groupmod '$group' -m '$INSTALL_USER'"
 		fi
 	done
 
 	if [ "$DRY_RUN" -eq 1 ] || [ -x "$(target_path /usr/local/bin/fish)" ]; then
-		run_in_target "pw usermod '$INSTALL_USER' -s /usr/local/bin/fish" || true
+		run_in_target "pw usermod '$INSTALL_USER' -s /usr/local/bin/fish"
 	fi
 }
 
@@ -1028,21 +1094,16 @@ write_user_file()
 	write_file "$path" "$mode"
 
 	if [ "$DRY_RUN" -eq 0 ]; then
-		chown "$uid:$gid" "$path"
+		chown "$uid:$gid" "$(user_path "$home" .config)" "${path%/*}" "$path"
 	fi
 }
 
 configure_user_files()
 {
-	[ -n "$INSTALL_USER" ] || return 0
-	if ! user_record "$INSTALL_USER" >/dev/null 2>&1 && [ "$DRY_RUN" -eq 0 ]; then
-		warn "skipping user files; $INSTALL_USER does not exist"
-		return 0
-	fi
-
-	write_user_file "$INSTALL_USER" .config/fish/config.fish 0644 <<'EOF'
-set -gx EDITOR nano
-set -gx VISUAL nano
+	{
+		printf 'set -gx EDITOR %s\nset -gx VISUAL %s\n' "$EDITOR_CMD" "$EDITOR_CMD"
+		cat <<'EOF'
+set -g fish_greeting
 set -gx PAGER less
 
 if test -z "$XDG_RUNTIME_DIR"
@@ -1054,27 +1115,64 @@ end
 if command -q zoxide
     zoxide init fish | source
 end
-EOF
 
-	write_user_file "$INSTALL_USER" .config/ghostty/config 0644 <<'EOF'
+if command -q yazi
+    function y
+        set -l tmp (mktemp)
+        command yazi $argv --cwd-file="$tmp"
+        if read -z cwd < "$tmp"; and test "$cwd" != "$PWD"; and test -d "$cwd"
+            builtin cd -- "$cwd"
+        end
+        command rm -f -- "$tmp"
+    end
+end
+
+if status is-interactive
+    if command -q starship
+        starship init fish | source
+    end
+    if command -q direnv
+        direnv hook fish | source
+    end
+    if command -q fzf
+        fzf --fish | source
+    end
+end
+EOF
+	} | write_user_file "$INSTALL_USER" .config/fish/config.fish 0644
+
+	if selected gnome || selected niri; then
+		write_user_file "$INSTALL_USER" .config/ghostty/config 0644 <<'EOF'
 font-family = JetBrainsMono Nerd Font
 command = /usr/local/bin/fish
 confirm-close-surface = false
 copy-on-select = clipboard
 EOF
+	fi
 
-	write_user_file "$INSTALL_USER" .config/niri/config.kdl 0644 <<'EOF'
+	selected niri || return 0
+
+	{
+		cat <<'EOF'
 environment {
     SHELL "/usr/local/bin/fish"
-    EDITOR "nano"
-    VISUAL "nano"
+EOF
+		printf '    EDITOR "%s"\n    VISUAL "%s"\n' "$EDITOR_CMD" "$EDITOR_CMD"
+		cat <<'EOF'
     XDG_CURRENT_DESKTOP "niri"
     XDG_SESSION_TYPE "wayland"
     QT_QPA_PLATFORM "wayland"
+    QT_QPA_PLATFORMTHEME "qt6ct"
     GDK_BACKEND "wayland,x11"
+EOF
+		if selected japanese; then
+			cat <<'EOF'
     GTK_IM_MODULE "fcitx"
     QT_IM_MODULE "fcitx"
     XMODIFIERS "@im=fcitx"
+EOF
+		fi
+		cat <<'EOF'
 }
 
 input {
@@ -1090,29 +1188,51 @@ input {
 }
 
 layout {
-    gaps 8
+    gaps 16
     center-focused-column "never"
+    background-color "transparent"
     preset-column-widths {
         proportion 0.33333
         proportion 0.5
         proportion 0.66667
     }
     default-column-width { proportion 0.5; }
+    focus-ring { width 3; }
+    border { off; }
 }
 
-spawn-at-startup "dbus-update-activation-environment" "--systemd" "DISPLAY" "WAYLAND_DISPLAY" "XDG_CURRENT_DESKTOP" "XDG_SESSION_TYPE" "XDG_RUNTIME_DIR"
+layer-rule {
+    match namespace="^noctalia-wallpaper.*"
+    place-within-backdrop true
+}
+
+spawn-at-startup "dbus-update-activation-environment" "DISPLAY" "WAYLAND_DISPLAY" "XDG_CURRENT_DESKTOP" "XDG_SESSION_TYPE" "XDG_RUNTIME_DIR"
 spawn-at-startup "gnome-keyring-daemon" "--start" "--components=secrets"
-spawn-at-startup "fcitx5" "-d"
-spawn-at-startup "qs" "-c" "noctalia-shell"
+EOF
+		if selected japanese; then
+			printf '%s\n' 'spawn-at-startup "fcitx5" "-d"'
+		fi
+		cat <<'EOF'
+// The FreeBSD WirePlumber package starts its daemon with PipeWire.
+spawn-at-startup "pipewire"
+spawn-at-startup "noctalia"
 
 prefer-no-csd
 screenshot-path "~/Pictures/Screenshots/%Y-%m-%d_%H-%M-%S.png"
 
 binds {
     Mod+Return { spawn "ghostty"; }
-    Mod+B { spawn "librewolf"; }
+EOF
+		if selected browsers; then
+			printf '%s\n' '    Mod+B { spawn "librewolf"; }'
+		fi
+		cat <<'EOF'
     Mod+E { spawn "nautilus"; }
-    Mod+D { spawn "qs" "-c" "noctalia-shell" "ipc" "call" "launcher" "toggle"; }
+    Mod+D { spawn "noctalia" "msg" "panel-toggle" "launcher"; }
+    Mod+V { spawn "noctalia" "msg" "panel-toggle" "clipboard"; }
+    Mod+Comma { spawn "noctalia" "msg" "settings-toggle"; }
+    Mod+Alt+L { spawn "noctalia" "msg" "session" "lock"; }
+    Mod+Escape { spawn "noctalia" "msg" "panel-toggle" "session"; }
     Mod+Q { close-window; }
     Mod+F { maximize-column; }
     Mod+Shift+F { fullscreen-window; }
@@ -1125,140 +1245,137 @@ binds {
     Mod+Shift+J { move-window-down; }
     Mod+Shift+K { move-window-up; }
     Print { spawn "sh" "-c" "grim -g \"$(slurp)\" - | wl-copy"; }
+    XF86AudioRaiseVolume allow-when-locked=true { spawn "noctalia" "msg" "volume-up"; }
+    XF86AudioLowerVolume allow-when-locked=true { spawn "noctalia" "msg" "volume-down"; }
+    XF86AudioMute allow-when-locked=true { spawn "noctalia" "msg" "volume-mute"; }
+    XF86AudioMicMute allow-when-locked=true { spawn "noctalia" "msg" "mic-mute"; }
+    XF86AudioPlay allow-when-locked=true { spawn "noctalia" "msg" "media" "toggle"; }
+    XF86AudioPrev allow-when-locked=true { spawn "noctalia" "msg" "media" "previous"; }
+    XF86AudioNext allow-when-locked=true { spawn "noctalia" "msg" "media" "next"; }
     Mod+Shift+E { quit; }
 }
 EOF
+	} | write_user_file "$INSTALL_USER" .config/niri/config.kdl 0644
 }
 
-stage_noctalia()
+install_noctalia()
 {
-	[ "$SKIP_NOCTALIA" -eq 0 ] || return 0
-	[ -n "$INSTALL_USER" ] || return 0
-	if ! user_record "$INSTALL_USER" >/dev/null 2>&1 && [ "$DRY_RUN" -eq 0 ]; then
+	selected niri || return 0
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would build and install Noctalia v5 revision $NOCTALIA_REF in $TARGET"
+		log "source build packages: $(printf '%s' "$NOCTALIA_BUILD_PACKAGES" | tr '\n' ' ')"
 		return 0
 	fi
 
-	if [ "$DRY_RUN" -eq 1 ]; then
-		log "would stage Noctalia shell/plugins for $INSTALL_USER"
-		warn "FreeBSD quickshell is upstream quickshell, not noctalia-qs; GNOME remains the fallback session"
-		return 0
+	log "building Noctalia v5 upstream FreeBSD revision $NOCTALIA_REF"
+	set -- /bin/sh -s -- "$NOCTALIA_REF" "$NOCTALIA_BUILD_PACKAGES"
+	if [ "$TARGET" != "/" ]; then
+		set -- chroot "$TARGET" "$@"
 	fi
+	try_install "Noctalia v5" "$@" <<'EOF'
+set -eu
+set -f
+ref=$1
+build_packages=$2
+# These names form the package list, not a single pkg argument.
+# shellcheck disable=SC2086
+env ASSUME_ALWAYS_YES=yes pkg install -y $build_packages
+
+build_root=$(mktemp -d)
+trap 'rm -rf "$build_root"' EXIT HUP INT TERM
+git init "$build_root/source"
+git -C "$build_root/source" remote add origin https://github.com/noctalia-dev/noctalia.git
+git -C "$build_root/source" fetch --depth 1 origin "$ref"
+git -C "$build_root/source" checkout --detach FETCH_HEAD
+meson setup "$build_root/build" "$build_root/source" --prefix=/usr/local \
+	--buildtype=release -Dtests=disabled -Djemalloc=disabled
+meson compile -C "$build_root/build"
+meson install -C "$build_root/build"
+EOF
+}
+
+configure_noctalia()
+{
+	selected niri || return 0
 
 	home=$(user_field "$INSTALL_USER" 6)
-	uid=$(user_field "$INSTALL_USER" 3)
-	gid=$(user_field "$INSTALL_USER" 4)
-	home_root=$(user_path "$home" .)
-	qs_dir="$home_root/.config/quickshell"
-	noctalia_dir="$qs_dir/noctalia-shell"
-	plugins_dir="$home_root/.config/noctalia/plugins"
+	config=$(user_path "$home" .config/noctalia/config.toml)
+	# Seed v5 defaults once. Later runs keep the user's TOML and GUI settings.
+	if [ ! -e "$config" ]; then
+		write_user_file "$INSTALL_USER" .config/noctalia/config.toml 0644 <<'EOF'
+[plugins]
+auto_update = "none"
+enabled = [
+    "noctalia/notes",
+    "noctalia/screen_recorder",
+    "noctalia/kaomoji",
+    "noctalia/wallhaven",
+]
 
-	mkdir -p "$qs_dir" "$plugins_dir"
+[[plugins.source]]
+kind = "git"
+location = "https://github.com/noctalia-dev/official-plugins"
+name = "official"
 
-	if [ ! -d "$noctalia_dir" ]; then
-		tmp=$(mktemp -d)
-		if fetch -o "$tmp/noctalia-shell.tar.gz" https://github.com/noctalia-dev/noctalia-shell/archive/refs/heads/main.tar.gz 2>/dev/null ||
-			curl -L -o "$tmp/noctalia-shell.tar.gz" https://github.com/noctalia-dev/noctalia-shell/archive/refs/heads/main.tar.gz; then
-			tar -xf "$tmp/noctalia-shell.tar.gz" -C "$tmp"
-			found=$(find "$tmp" -maxdepth 1 -type d -name 'noctalia-shell-*' | head -n 1)
-			[ -n "$found" ] && mv "$found" "$noctalia_dir"
-		else
-			warn "could not download noctalia-shell"
-		fi
-		rm -rf "$tmp"
-	fi
+[[plugins.source]]
+kind = "git"
+location = "https://github.com/noctalia-dev/community-plugins"
+name = "community"
 
-	tmp=$(mktemp -d)
-	if fetch -o "$tmp/noctalia-plugins.tar.gz" https://github.com/noctalia-dev/noctalia-plugins/archive/refs/heads/main.tar.gz 2>/dev/null ||
-		curl -L -o "$tmp/noctalia-plugins.tar.gz" https://github.com/noctalia-dev/noctalia-plugins/archive/refs/heads/main.tar.gz; then
-		tar -xf "$tmp/noctalia-plugins.tar.gz" -C "$tmp"
-		root=$(find "$tmp" -maxdepth 1 -type d -name 'noctalia-plugins-*' | head -n 1)
-		if [ -n "$root" ]; then
-			for plugin in $NOCTALIA_PLUGINS; do
-				[ -d "$root/$plugin" ] && cp -R "$root/$plugin" "$plugins_dir/"
-			done
-		fi
-	else
-		warn "could not download noctalia-plugins"
-	fi
-	rm -rf "$tmp"
+[shell]
+polkit_agent = true
 
-	if [ ! -f "$home_root/.config/noctalia/plugins.json" ]; then
-		cat >"$home_root/.config/noctalia/plugins.json" <<'EOF'
-{
-  "enabled": [
-    "clipper",
-    "file-search",
-    "niri-animation-picker",
-    "niri-overview-launcher",
-    "noctalia-calculator",
-    "polkit-agent",
-    "screen-toolkit",
-    "todo"
-  ]
-}
+[shell.greeter_sync]
+auto_sync = false
+
+[theme.templates]
+builtin_ids = ["niri"]
+
+[wallpaper]
+directory = "~/Pictures"
+fill_mode = "crop"
 EOF
 	fi
-
-	chown -R "$uid:$gid" "$home_root/.config/quickshell" "$home_root/.config/noctalia"
-	warn "FreeBSD quickshell is upstream quickshell, not noctalia-qs; GNOME remains the fallback session"
 }
 
-install_zed_port_package()
+configure_lazyvim()
 {
-	[ "$SKIP_ZED" -eq 0 ] || return 0
-
+	selected tools || return 0
+	home=$(user_field "$INSTALL_USER" 6)
+	config=$(user_path "$home" .config/nvim)
+	if [ -e "$config" ]; then
+		log "keeping existing Neovim config for $INSTALL_USER"
+		return 0
+	fi
 	if [ "$DRY_RUN" -eq 1 ]; then
-		log "would install matching Zed port package from tagattie/FreeBSD-Zed"
+		log "would install LazyVim starter revision $LAZYVIM_REF for $INSTALL_USER"
 		return 0
 	fi
 
-	if ! is_freebsd; then
-		warn "skipping Zed port package install; must run on FreeBSD"
-		return 0
+	uid=$(user_field "$INSTALL_USER" 3)
+	gid=$(user_field "$INSTALL_USER" 4)
+	set -- /bin/sh -s -- "$home" "$uid:$gid" "$LAZYVIM_REF"
+	if [ "$TARGET" != "/" ]; then
+		set -- chroot "$TARGET" "$@"
 	fi
-
-	run_in_target "
+	try_install "LazyVim starter" "$@" <<'EOF'
 set -eu
-release=\$(freebsd-version -u 2>/dev/null || uname -r)
-major=\${release%%.*}
-arch=\$(uname -m)
-case \"\$arch\" in
-	amd64|x86_64) arch=amd64 ;;
-	aarch64|arm64) arch=aarch64 ;;
-	*)
-		printf '%s\n' \"warn: no Zed port package for architecture \$arch\" >&2
-		exit 0
-		;;
-esac
-
-tmp=\$(mktemp -d)
-trap 'rm -rf \"\$tmp\"' EXIT
-
-if command -v fetch >/dev/null 2>&1; then
-	fetch -qo \"\$tmp/release.json\" \"$ZED_PORT_RELEASE_API\"
-else
-	curl -fsSL \"$ZED_PORT_RELEASE_API\" -o \"\$tmp/release.json\"
-fi
-
-url=\$(jq -r --arg major \"\$major\" --arg arch \"\$arch\" '
-	.assets[]
-	| select(.name | test(\"^zed-editor-.*-freebsd\" + \$major + \"-\" + \$arch + \"\\\\.pkg$\"))
-	| .browser_download_url
-' \"\$tmp/release.json\" | head -n 1)
-
-if [ -z \"\$url\" ] || [ \"\$url\" = null ]; then
-	printf '%s\n' \"warn: no Zed port package found for FreeBSD \$major \$arch\" >&2
-	exit 0
-fi
-
-if command -v fetch >/dev/null 2>&1; then
-	fetch -qo \"\$tmp/zed-editor.pkg\" \"\$url\"
-else
-	curl -fL \"\$url\" -o \"\$tmp/zed-editor.pkg\"
-fi
-
-env ASSUME_ALWAYS_YES=yes pkg install -y \"\$tmp/zed-editor.pkg\"
-"
+home=$1
+owner=$2
+ref=$3
+mkdir -p "$home/.config"
+seed=$(mktemp -d "$home/.config/.nvim.XXXXXX")
+trap 'rm -rf "$seed"' EXIT HUP INT TERM
+git init "$seed"
+git -C "$seed" remote add origin https://github.com/LazyVim/starter.git
+git -C "$seed" fetch --depth 1 origin "$ref"
+git -C "$seed" checkout --detach FETCH_HEAD
+rm -rf "$seed/.git"
+chown -R "$owner" "$seed"
+chown "$owner" "$home/.config"
+mv "$seed" "$home/.config/nvim"
+EOF
 }
 
 write_firefox_policy()
@@ -1430,13 +1547,20 @@ PY
 
 validate_manifest()
 {
-	dupes=$(all_package_manifest | sort | uniq -d)
+	for component in $COMPONENTS; do
+		case "$component" in
+			tools|dev|gnome|niri|browsers|zed|media|kde|apps|japanese|gpu) ;;
+			*) die "unknown component: $component" ;;
+		esac
+	done
+	dupes=$(package_manifest | sort | uniq -d)
 	if [ -n "$dupes" ]; then
 		printf '%s\n' "$dupes" >&2
 		die "package manifest contains duplicates"
 	fi
 
-	all_package_manifest | awk '
+	printf '%s\n%s\n' "$(package_manifest)" "$NOCTALIA_BUILD_PACKAGES" | awk '
+		!NF { next }
 		$0 !~ /^[A-Za-z0-9_.+@-]+$/ {
 			printf "bad package name: %s\n", $0 > "/dev/stderr"
 			bad = 1
@@ -1464,10 +1588,10 @@ validate_only()
 select_install_disk()
 {
 	if ! is_freebsd; then
-		die "--bsdinstall-guided must be run from the FreeBSD installer"
+		die "--guided must be run from the FreeBSD installer"
 	fi
 	if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-		die "--bsdinstall-guided needs an interactive tty"
+		die "--guided needs an interactive tty"
 	fi
 
 	disks=$(sysctl -n kern.disks 2>/dev/null || true)
@@ -1498,15 +1622,7 @@ write_bsdinstall_config()
 {
 	cfg=$1
 	disk=$2
-	install_args="--from-installer --pkg-branch $PKG_BRANCH"
-	[ -n "$INSTALL_USER" ] && install_args="$install_args --user $INSTALL_USER"
-	if [ "$GPU_MODULE" != auto ]; then
-		gpu_arg=$(printf '%s\n' "$GPU_MODULE" | tr ' ' ',')
-		install_args="$install_args --gpu-module $gpu_arg"
-	fi
-	[ "$SKIP_NOCTALIA" -eq 1 ] && install_args="$install_args --skip-noctalia"
-	[ "$SKIP_ZED" -eq 1 ] && install_args="$install_args --skip-zed"
-	[ "$ENABLE_CRASH_DUMPS" -eq 1 ] && install_args="$install_args --enable-crash-dumps"
+	install_args="--user $INSTALL_USER"
 
 	cat >"$cfg" <<EOF
 DISTRIBUTIONS="kernel.txz base.txz"
@@ -1517,6 +1633,10 @@ export ZFSBOOT_CONFIRM_LAYOUT="1"
 
 #!/bin/sh
 set -eu
+
+export INSTALL_COMPONENTS="$COMPONENTS"
+export PKG_BRANCH="$PKG_BRANCH"
+export GPU_MODULE="$GPU_MODULE"
 
 if command -v fetch >/dev/null 2>&1; then
 	fetch -o /tmp/freebsd-install.sh "$INSTALL_URL"
@@ -1549,9 +1669,19 @@ run_bsdinstall_guided()
 
 main()
 {
+	if [ "$TUI" -eq 1 ]; then
+		select_components
+	fi
+
 	if [ "$VALIDATE_ONLY" -eq 1 ]; then
 		validate_only
 		return 0
+	fi
+
+	validate_manifest
+	resolve_install_user
+	if selected tools; then
+		EDITOR_CMD=nvim
 	fi
 
 	if [ "$BSDINSTALL_GUIDED" -eq 1 ]; then
@@ -1561,26 +1691,37 @@ main()
 
 	need_root
 
-	if [ "$FROM_INSTALLER" -eq 1 ]; then
-		log "running post-install bootstrap inside bsdinstall chroot"
-	fi
-
 	install_packages
+	install_app_ports
+	install_noctalia
 	configure_rc_conf
 	configure_gpu_driver
 	configure_hardening
 	configure_mounts
 	configure_doas_and_editor
-	configure_xdg_runtime_rc
-	configure_niri_session
-	write_browser_policies
+	if selected gnome || selected niri; then
+		configure_xdg_runtime_rc
+	fi
+	if selected niri; then
+		configure_niri_session
+	fi
+	if selected browsers; then
+		write_browser_policies
+	fi
 	ensure_user
 	configure_user_files
-	install_zed_port_package
-	stage_noctalia
+	configure_lazyvim
+	configure_noctalia
 
-	log "done"
-	log "reboot, then use GDM for GNOME or the Niri session"
+	if [ -n "$FAILED_INSTALLS" ]; then
+		log "finished with install failures:"
+		printf '%s\n' "$FAILED_INSTALLS"
+	else
+		log "done"
+	fi
+	if selected gnome || selected niri; then
+		log "reboot, then choose your desktop in GDM"
+	fi
 }
 
 main "$@"
