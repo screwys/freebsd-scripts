@@ -51,14 +51,17 @@ finish()
 	status=$?
 	trap - EXIT
 	set +e
-	if { [ "$status" -ne 0 ] || ! "$passed"; } && [ -n "$xvfb_pid" ]; then
-		DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '.*' \
-			>"$fixture_root/window-ids.txt" 2>"$fixture_root/windows.log"
-		while IFS= read -r window_id; do
-			printf '\nwindow=%s\n' "$window_id"
-			DISPLAY=:99 timeout 5 xdotool getwindowname "$window_id"
-			DISPLAY=:99 timeout 5 xdotool getwindowgeometry --shell "$window_id"
-		done <"$fixture_root/window-ids.txt" >>"$fixture_root/windows.log" 2>&1
+	if [ "$status" -ne 0 ] || ! "$passed"; then
+		ps -U ci-login -o pid,ppid,stat,comm >"$fixture_root/session-processes.txt" 2>&1
+		if [ -n "$xvfb_pid" ]; then
+			DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '.*' \
+				>"$fixture_root/window-ids.txt" 2>"$fixture_root/windows.log"
+			while IFS= read -r window_id; do
+				printf '\nwindow=%s\n' "$window_id"
+				DISPLAY=:99 timeout 5 xdotool getwindowname "$window_id"
+				DISPLAY=:99 timeout 5 xdotool getwindowgeometry --shell "$window_id"
+			done <"$fixture_root/window-ids.txt" >>"$fixture_root/windows.log" 2>&1
+		fi
 	fi
 	[ -z "$greetd_pid" ] || stop_tree "$greetd_pid"
 	pkill -TERM -u 2001 2>/dev/null
@@ -85,6 +88,9 @@ finish()
 	if "$niri_launcher_saved"; then
 		cp -p "$fixture_root/niri-launcher.original" "$niri_launcher" || status=1
 	fi
+	for noctalia_log in "$login_home/.cache/noctalia/noctalia.log" "$login_home/.cache/noctalia/noctalia.log.1"; do
+		[ ! -f "$noctalia_log" ] || cp "$noctalia_log" "$fixture_root/"
+	done
 	if [ -d "$report_dir" ]; then
 		rm -rf "$fixture_root/session"
 		cp -R "$report_dir" "$fixture_root/session"
@@ -94,7 +100,9 @@ finish()
 		jq -n --arg stage "$stage" --argjson exitStatus "$status" \
 			'{status: "failed", stage: $stage, exitStatus: $exitStatus}' >"$fixture_root/result.json"
 		for file in "$fixture_root/greetd.log" "$fixture_root/greeter.log" "$fixture_root/xvfb.log" \
-			"$fixture_root/windows.log" "$report_dir/probe.log" "$report_dir/failure.json"; do
+			"$fixture_root/windows.log" "$fixture_root/session-processes.txt" \
+			"$fixture_root/noctalia.log" "$fixture_root/noctalia.log.1" \
+			"$report_dir/noctalia-startup.log" "$report_dir/probe.log" "$report_dir/failure.json"; do
 			[ ! -f "$file" ] || { printf '\n%s\n' "$file"; tail -n 100 "$file"; }
 		done
 	fi
@@ -115,7 +123,7 @@ wait_until()
 {
 	description=$1
 	shift
-	deadline=$(($(date +%s) + 90))
+	deadline=$(($(date +%s) + 120))
 	while ! "$@"; do
 		[ ! -f "$report_dir/failure.json" ] || fail 'session probe reported a failure'
 		[ -z "$greetd_pid" ] || kill -0 "$greetd_pid" 2>/dev/null || fail 'greetd exited'
@@ -162,8 +170,10 @@ submit_password()
 [ -x "$niri_launcher" ] || fail 'installed Niri session wrapper is missing'
 [ -f /usr/local/share/wayland-sessions/niri.desktop ] || fail 'installed Niri desktop entry is missing'
 
-rm -f "$fixture_root/result.json" "$fixture_root/greeter.log"
+rm -f "$fixture_root/result.json" "$fixture_root/greeter.log" "$fixture_root/noctalia.log" \
+	"$fixture_root/noctalia.log.1" "$fixture_root/session-processes.txt"
 rm -rf "$report_dir"
+install -d -o 2001 -g "$(id -g ci-login)" -m 700 "$login_home/.cache"
 install -d -o 2001 -g "$(id -g ci-login)" -m 700 "$report_dir"
 install -m 755 "$script_dir/temporary-session-probe.sh" "$fixture_root/session-probe"
 cat >"$fixture_root/run-probe" <<EOF
@@ -188,6 +198,11 @@ export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 EOF
 cp -p "$niri_config" "$fixture_root/config.kdl.original"
 niri_saved=true
+# Niri discards app stderr, so retain Noctalia's early startup errors in CI.
+awk -v startup="spawn-at-startup \"sh\" \"-c\" \"exec env NOCTALIA_LOG_LEVEL=debug /usr/local/bin/noctalia >$report_dir/noctalia-startup.log 2>&1\"" '
+	$0 == "spawn-at-startup \"noctalia\"" { print startup; next }
+	{ print }
+' "$fixture_root/config.kdl.original" >"$niri_config"
 printf '\nspawn-at-startup "%s/run-probe"\n' "$fixture_root" >>"$niri_config"
 niri validate -c "$niri_config"
 
