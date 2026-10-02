@@ -1,0 +1,807 @@
+diff --git a/greetd/src/config/mod.rs b/greetd/src/config/mod.rs
+index 10882ac..f92e633 100644
+--- a/greetd/src/config/mod.rs
++++ b/greetd/src/config/mod.rs
+@@ -5,7 +5,10 @@ use getopts::Options;
+ 
+ use super::error::Error;
+ 
++#[cfg(not(target_os = "freebsd"))]
+ const RUNFILE: &str = "/run/greetd.run";
++#[cfg(target_os = "freebsd")]
++const RUNFILE: &str = "/var/run/greetd.run";
+ const GENERAL_SERVICE: &str = "greetd";
+ const GREETER_SERVICE: &str = "greetd-greeter";
+ 
+diff --git a/greetd/src/context.rs b/greetd/src/context.rs
+index 91638b0..1deec95 100644
+--- a/greetd/src/context.rs
++++ b/greetd/src/context.rs
+@@ -48,6 +48,8 @@ pub struct Context {
+     source_profile: bool,
+     runfile: String,
+     listener_path: String,
++    #[cfg(target_os = "freebsd")]
++    executable: File,
+ }
+ 
+ impl Context {
+@@ -61,6 +63,7 @@ impl Context {
+         source_profile: bool,
+         runfile: String,
+         listener_path: String,
++        #[cfg(target_os = "freebsd")] executable: File,
+     ) -> Context {
+         Context {
+             inner: RwLock::new(ContextInner {
+@@ -76,6 +79,8 @@ impl Context {
+             source_profile,
+             runfile,
+             listener_path,
++            #[cfg(target_os = "freebsd")]
++            executable,
+         }
+     }
+ 
+@@ -89,7 +94,10 @@ impl Context {
+         service: &str,
+         cmd: Vec<String>,
+     ) -> Result<SessionChild, Error> {
+-        let mut scheduled_session = Session::new_external()?;
++        let mut scheduled_session = Session::new_external(
++            #[cfg(target_os = "freebsd")]
++            &self.executable,
++        )?;
+         scheduled_session
+             .initiate(
+                 service,
+@@ -197,7 +205,10 @@ impl Context {
+         }
+ 
+         let mut session_set = SessionSet {
+-            session: Session::new_external()?,
++            session: Session::new_external(
++                #[cfg(target_os = "freebsd")]
++                &self.executable,
++            )?,
+             time: Instant::now(),
+         };
+         session_set
+diff --git a/greetd/src/main.rs b/greetd/src/main.rs
+index e66fdf1..529881c 100644
+--- a/greetd/src/main.rs
++++ b/greetd/src/main.rs
+@@ -7,6 +7,12 @@ mod server;
+ mod session;
+ mod terminal;
+ 
++#[cfg(not(target_os = "freebsd"))]
++extern crate pam_sys;
++#[cfg(target_os = "freebsd")]
++#[path = "pam/openpam.rs"]
++mod pam_sys;
++
+ use std::os::unix::{
+     io::{FromRawFd, RawFd},
+     net::UnixDatagram,
+diff --git a/greetd/src/pam/env.rs b/greetd/src/pam/env.rs
+index a679322..c91f5a3 100644
+--- a/greetd/src/pam/env.rs
++++ b/greetd/src/pam/env.rs
+@@ -1,7 +1,9 @@
+ use std::ffi::CStr;
+ 
++#[cfg(target_os = "linux")]
++use crate::pam_sys::raw;
++use crate::pam_sys::{getenvlist, PamHandle};
+ use libc::c_char;
+-use pam_sys::{getenvlist, raw, PamHandle};
+ 
+ pub struct PamEnvList {
+     ptr: *const *const c_char,
+@@ -43,3 +45,17 @@ impl Drop for PamEnvList {
+         unsafe { raw::pam_misc_drop_env(self.ptr as *mut *mut c_char) };
+     }
+ }
++
++#[cfg(target_os = "freebsd")]
++impl Drop for PamEnvList {
++    fn drop(&mut self) {
++        unsafe {
++            let mut entry = self.ptr;
++            while !(*entry).is_null() {
++                libc::free((*entry).cast_mut().cast());
++                entry = entry.add(1);
++            }
++            libc::free(self.ptr.cast_mut().cast());
++        }
++    }
++}
+diff --git a/greetd/src/pam/ffi.rs b/greetd/src/pam/ffi.rs
+index 5fd9bff..5ca0fa8 100644
+--- a/greetd/src/pam/ffi.rs
++++ b/greetd/src/pam/ffi.rs
+@@ -1,7 +1,7 @@
+ use std::{ffi::CStr, mem, pin::Pin};
+ 
++use crate::pam_sys::{PamConversation, PamMessage, PamMessageStyle, PamResponse, PamReturnCode};
+ use libc::{c_char, c_int, c_void, calloc, free, memcpy, size_t};
+-use pam_sys::{PamConversation, PamMessage, PamMessageStyle, PamResponse, PamReturnCode};
+ 
+ use super::converse::Converse;
+ 
+diff --git a/greetd/src/pam/mod.rs b/greetd/src/pam/mod.rs
+index 95a3b8f..0c73945 100644
+--- a/greetd/src/pam/mod.rs
++++ b/greetd/src/pam/mod.rs
+@@ -5,7 +5,7 @@ pub mod session;
+ 
+ use thiserror::Error as ThisError;
+ 
+-use pam_sys::PamReturnCode;
++use crate::pam_sys::PamReturnCode;
+ 
+ #[derive(Debug, ThisError)]
+ pub enum PamError {
+diff --git a/greetd/src/pam/session.rs b/greetd/src/pam/session.rs
+index dd06424..9bd74b4 100644
+--- a/greetd/src/pam/session.rs
++++ b/greetd/src/pam/session.rs
+@@ -5,8 +5,8 @@ use std::{
+     ptr,
+ };
+ 
++use crate::pam_sys::{self, PamFlag, PamHandle, PamItemType, PamReturnCode};
+ use libc::c_void;
+-use pam_sys::{PamFlag, PamHandle, PamItemType, PamReturnCode};
+ 
+ use super::{
+     converse::Converse,
+diff --git a/greetd/src/server.rs b/greetd/src/server.rs
+index 84cb54f..241c7ed 100644
+--- a/greetd/src/server.rs
++++ b/greetd/src/server.rs
+@@ -108,9 +108,28 @@ async fn client_handler(ctx: &Context, mut s: UnixStream) -> Result<(), Error> {
+ //
+ // If the target is VtSelection::None, return nothing.
+ fn get_tty(config: &Config) -> Result<TerminalMode, Error> {
++    #[cfg(not(target_os = "freebsd"))]
+     const TTY_PREFIX: &str = "/dev/tty";
++    #[cfg(target_os = "freebsd")]
++    const TTY_PREFIX: &str = "/dev/ttyv";
+     const PTS_PREFIX: &str = "/dev/pts";
+ 
++    let tty_path = |vt: usize| -> Result<String, Error> {
++        #[cfg(not(target_os = "freebsd"))]
++        {
++            Ok(format!("/dev/tty{vt}"))
++        }
++        #[cfg(target_os = "freebsd")]
++        {
++            let index = vt.checked_sub(1).ok_or("VT numbers start at 1")?;
++            Ok(format!("/dev/ttyv{index:x}"))
++        }
++    };
++    #[cfg(not(target_os = "freebsd"))]
++    const CONTROL_TTY: &str = "/dev/tty0";
++    #[cfg(target_os = "freebsd")]
++    const CONTROL_TTY: &str = "/dev/ttyv0";
++
+     let term = match config.file.terminal.vt {
+         VtSelection::Current => {
+             let term = Terminal::stdin();
+@@ -119,9 +138,14 @@ fn get_tty(config: &Config) -> Result<TerminalMode, Error> {
+                 Ok(term_name)
+                     if term_name.starts_with(TTY_PREFIX) && term_name.len() > TTY_PREFIX.len() =>
+                 {
++                    #[cfg(not(target_os = "freebsd"))]
+                     let vt = term_name[TTY_PREFIX.len()..]
+                         .parse()
+                         .map_err(|e| Error::Error(format!("unable to parse tty number: {e}")))?;
++                    #[cfg(target_os = "freebsd")]
++                    let vt = usize::from_str_radix(&term_name[TTY_PREFIX.len()..], 16)
++                        .map_err(|e| Error::Error(format!("unable to parse tty number: {e}")))?
++                        + 1;
+ 
+                     TerminalMode::Terminal {
+                         path: term_name,
+@@ -134,13 +158,13 @@ fn get_tty(config: &Config) -> Result<TerminalMode, Error> {
+                 }
+                 // We don't have a usable terminal, so we have to jump through some hoops
+                 _ => {
+-                    let sys_term = Terminal::open("/dev/tty0")
++                    let sys_term = Terminal::open(CONTROL_TTY)
+                         .map_err(|e| format!("unable to open terminal: {e}"))?;
+                     let vt = sys_term
+                         .vt_get_current()
+                         .map_err(|e| format!("unable to get current VT: {e}"))?;
+                     TerminalMode::Terminal {
+-                        path: format!("/dev/tty{vt}"),
++                        path: tty_path(vt)?,
+                         vt,
+                         switch: false,
+                     }
+@@ -149,19 +173,19 @@ fn get_tty(config: &Config) -> Result<TerminalMode, Error> {
+         }
+         VtSelection::Next => {
+             let term =
+-                Terminal::open("/dev/tty0").map_err(|e| format!("unable to open terminal: {e}"))?;
++                Terminal::open(CONTROL_TTY).map_err(|e| format!("unable to open terminal: {e}"))?;
+             let vt = term
+                 .vt_get_next()
+                 .map_err(|e| format!("unable to get next VT: {e}"))?;
+             TerminalMode::Terminal {
+-                path: format!("/dev/tty{vt}"),
++                path: tty_path(vt)?,
+                 vt,
+                 switch: config.file.terminal.switch,
+             }
+         }
+         VtSelection::None => TerminalMode::Stdin,
+         VtSelection::Specific(vt) => TerminalMode::Terminal {
+-            path: format!("/dev/tty{vt}"),
++            path: tty_path(vt)?,
+             vt,
+             switch: config.file.terminal.switch,
+         },
+@@ -172,6 +196,8 @@ fn get_tty(config: &Config) -> Result<TerminalMode, Error> {
+ fn pam_service_exists(service: &str) -> bool {
+     Path::new(&format!("/etc/pam.d/{}", service)).exists()
+         || Path::new(&format!("/usr/lib/pam.d/{}", service)).exists()
++        || (cfg!(target_os = "freebsd")
++            && Path::new(&format!("/usr/local/etc/pam.d/{}", service)).exists())
+ }
+ 
+ // Listener is a convenience wrapper for creating the UnixListener we need, and
+@@ -180,7 +206,10 @@ struct Listener(UnixListener);
+ 
+ impl Listener {
+     fn create(uid: Uid, gid: Gid) -> Result<(String, Listener), Error> {
++        #[cfg(not(target_os = "freebsd"))]
+         let path = format!("/run/greetd-{}.sock", getpid().as_raw());
++        #[cfg(target_os = "freebsd")]
++        let path = format!("/var/run/greetd-{}.sock", getpid().as_raw());
+         let _ = std::fs::remove_file(&path);
+         let listener =
+             UnixListener::bind(&path).map_err(|e| format!("unable to open listener: {e}"))?;
+@@ -237,6 +266,8 @@ pub async fn main(config: Config) -> Result<(), Error> {
+         config.file.general.source_profile,
+         config.file.general.runfile,
+         listener_path,
++        #[cfg(target_os = "freebsd")]
++        std::fs::File::open(std::env::current_exe()?)?,
+     ));
+ 
+     if let (Some(s), true) = (config.file.initial_session, ctx.is_first_run()) {
+diff --git a/greetd/src/session/interface.rs b/greetd/src/session/interface.rs
+index baed428..4295ae1 100644
+--- a/greetd/src/session/interface.rs
++++ b/greetd/src/session/interface.rs
+@@ -6,10 +6,16 @@ use std::{
+ use nix::{
+     fcntl::{fcntl, FcntlArg, FdFlag},
+     sys::signal::Signal,
+-    unistd::{execv, fork, ForkResult, Pid},
++    unistd::{fork, ForkResult, Pid},
+ };
+ 
+ use async_trait::async_trait;
++#[cfg(not(target_os = "freebsd"))]
++use nix::unistd::execv;
++#[cfg(target_os = "freebsd")]
++use nix::unistd::fexecve;
++#[cfg(target_os = "freebsd")]
++use std::fs::File;
+ 
+ use tokio::net::UnixDatagram as TokioUnixDatagram;
+ 
+@@ -94,7 +100,7 @@ pub struct Session {
+ 
+ impl Session {
+     /// Create a session started as an external process.
+-    pub fn new_external() -> Result<Session, Error> {
++    pub fn new_external(#[cfg(target_os = "freebsd")] executable: &File) -> Result<Session, Error> {
+         // Pipe used to communicate the true PID of the final child.
+         let (parentfd, childfd) =
+             UnixDatagram::pair().map_err(|e| format!("could not create pipe: {e}"))?;
+@@ -104,14 +110,23 @@ impl Session {
+         cur_flags.remove(FdFlag::FD_CLOEXEC);
+         fcntl(raw_child, FcntlArg::F_SETFD(cur_flags))?;
+ 
+-        // On Linux, /proc/self/exe is a reference to the original file, which remains valid
+-        // in spite of unlink or rename similar to an already open fd. It is, however, not very
+-        // portable. On FreeBSD, we would likely need to open our own process file early and rely
+-        // on fexecve, using the KERN_PROC_PATHNAME sysctl to get the path.
++        #[cfg(target_os = "freebsd")]
++        let environment: Vec<CString> = {
++            use std::os::unix::ffi::OsStrExt;
++            std::env::vars_os()
++                .map(|(key, value)| {
++                    let mut entry = key.as_bytes().to_vec();
++                    entry.push(b'=');
++                    entry.extend_from_slice(value.as_bytes());
++                    CString::new(entry).map_err(|e| Error::Error(e.to_string()))
++                })
++                .collect::<Result<_, _>>()?
++        };
+         #[allow(unreachable_code)]
+         let child = match unsafe { fork() }.map_err(|e| format!("unable to fork: {e}"))? {
+             ForkResult::Parent { child, .. } => child,
+             ForkResult::Child => {
++                #[cfg(not(target_os = "freebsd"))]
+                 execv(
+                     &CString::new("/proc/self/exe").unwrap(),
+                     &[
+@@ -121,6 +136,17 @@ impl Session {
+                     ],
+                 )
+                 .expect("unable to exec");
++                #[cfg(target_os = "freebsd")]
++                fexecve(
++                    executable.as_raw_fd(),
++                    &[
++                        &CString::new("greetd").unwrap(),
++                        &CString::new("--session-worker").unwrap(),
++                        &CString::new(format!("{}", raw_child as usize)).unwrap(),
++                    ],
++                    &environment,
++                )
++                .expect("unable to exec");
+ 
+                 unreachable!("after exec");
+             }
+diff --git a/greetd/src/session/mod.rs b/greetd/src/session/mod.rs
+index e1a08cb..5e9da0d 100644
+--- a/greetd/src/session/mod.rs
++++ b/greetd/src/session/mod.rs
+@@ -1,4 +1,6 @@
+ pub mod conv;
++#[cfg(target_os = "freebsd")]
++mod freebsd;
+ pub mod interface;
+ mod prctl;
+ pub mod worker;
+diff --git a/greetd/src/session/prctl.rs b/greetd/src/session/prctl.rs
+index f703f9d..a1bb7e4 100644
+--- a/greetd/src/session/prctl.rs
++++ b/greetd/src/session/prctl.rs
+@@ -1,5 +1,6 @@
+ use nix::{errno::Errno, Result};
+ 
++#[cfg(not(target_os = "freebsd"))]
+ pub const PRCTL_SET_PDEATHSIG: i32 = 1;
+ 
+ #[allow(non_camel_case_types)]
+@@ -10,7 +11,20 @@ pub enum PrctlOption {
+ pub fn prctl(option: PrctlOption) -> Result<()> {
+     Errno::result(match option {
+         PrctlOption::SET_PDEATHSIG(sig) => unsafe {
+-            libc::prctl(PRCTL_SET_PDEATHSIG, sig, 0, 0, 0)
++            #[cfg(not(target_os = "freebsd"))]
++            {
++                libc::prctl(PRCTL_SET_PDEATHSIG, sig, 0, 0, 0)
++            }
++            #[cfg(target_os = "freebsd")]
++            {
++                let mut sig = sig;
++                libc::procctl(
++                    libc::P_PID,
++                    0,
++                    libc::PROC_PDEATHSIG_CTL,
++                    (&raw mut sig).cast(),
++                )
++            }
+         },
+     })
+     .map(drop)
+diff --git a/greetd/src/session/worker.rs b/greetd/src/session/worker.rs
+index 29ff2be..ce4f242 100644
+--- a/greetd/src/session/worker.rs
++++ b/greetd/src/session/worker.rs
+@@ -1,10 +1,12 @@
+ use std::{env, ffi::CString, os::unix::net::UnixDatagram};
+ 
++use crate::pam_sys::{PamFlag, PamItemType};
++#[cfg(not(target_os = "freebsd"))]
++use nix::unistd::setuid;
+ use nix::{
+     sys::wait::waitpid,
+-    unistd::{execve, fork, initgroups, setgid, setsid, setuid, ForkResult},
++    unistd::{execve, fork, initgroups, setgid, setsid, ForkResult},
+ };
+-use pam_sys::{PamFlag, PamItemType};
+ use serde::{Deserialize, Serialize};
+ 
+ use super::{
+@@ -141,6 +143,14 @@ fn worker(sock: &UnixDatagram) -> Result<(), Error> {
+         _ => {}
+     };
+ 
++    #[cfg(target_os = "freebsd")]
++    {
++        let name = pam.get_user()?;
++        let user = nix::unistd::User::from_name(&name)?.ok_or("unable to get user info")?;
++        setgid(user.gid)?;
++        initgroups(&CString::new(name)?, user.gid)?;
++    }
++
+     // Not the credentials you think.
+     pam.setcred(PamFlag::ESTABLISH_CRED)?;
+ 
+@@ -180,7 +190,7 @@ fn worker(sock: &UnixDatagram) -> Result<(), Error> {
+         TerminalMode::Stdin => (),
+         TerminalMode::Terminal { path, vt, switch } => {
+             // Tell PAM what TTY we're targeting, which is used by logind.
+-            pam.set_item(PamItemType::TTY, &format!("tty{vt}"))?;
++            pam.set_item(PamItemType::TTY, path.trim_start_matches("/dev/"))?;
+             pam.putenv(&format!("XDG_VTNR={vt}"))?;
+ 
+             // Opening our target terminal.
+@@ -261,9 +271,18 @@ fn worker(sock: &UnixDatagram) -> Result<(), Error> {
+             // this match arm.
+ 
+             // Drop privileges to target user
+-            initgroups(&cusername, user.gid).expect("unable to init groups");
+-            setgid(user.gid).expect("unable to set GID");
+-            setuid(user.uid).expect("unable to set UID");
++            #[cfg(not(target_os = "freebsd"))]
++            {
++                initgroups(&cusername, user.gid).expect("unable to init groups");
++                setgid(user.gid).expect("unable to set GID");
++                setuid(user.uid).expect("unable to set UID");
++            }
++            #[cfg(target_os = "freebsd")]
++            let freebsd_env =
++                super::freebsd::set_user_context(&cusername, user.uid.as_raw(), &envvec)
++                    .expect("unable to set user context");
++            #[cfg(target_os = "freebsd")]
++            let envvec: Vec<_> = freebsd_env.iter().map(|entry| entry.as_c_str()).collect();
+ 
+             // Set our parent death signal. setuid/setgid above resets the
+             // death signal, which is why we do this here.
+diff --git a/greetd/src/terminal/mod.rs b/greetd/src/terminal/mod.rs
+index 68ae0ae..a5e5332 100644
+--- a/greetd/src/terminal/mod.rs
++++ b/greetd/src/terminal/mod.rs
+@@ -1,3 +1,7 @@
++#[cfg(not(target_os = "freebsd"))]
++mod ioctl;
++#[cfg(target_os = "freebsd")]
++#[path = "freebsd.rs"]
+ mod ioctl;
+ 
+ use crate::error::Error;
+@@ -142,7 +146,8 @@ impl Terminal {
+     /// VT_SETMODE followed by VT_ACTIVATE is used. For all platforms,
+     /// VT_WAITACTIVE is used to wait for shell activation.
+     pub fn vt_setactivate(&self, target_vt: usize) -> Result<(), Error> {
+-        if cfg!(target_os = "linux") {
++        #[cfg(target_os = "linux")]
++        {
+             let arg = ioctl::vt_setactivate {
+                 console: target_vt as u32,
+                 mode: ioctl::vt_mode {
+@@ -159,7 +164,9 @@ impl Terminal {
+             if let Err(v) = unsafe { ioctl::vt_waitactive(self.fd, target_vt as i32) } {
+                 return Err(format!("terminal: unable to wait for activation: {v}").into());
+             }
+-        } else {
++        }
++        #[cfg(not(target_os = "linux"))]
++        {
+             self.vt_mode_clean()?;
+             self.vt_activate(target_vt)?;
+         }
+@@ -168,19 +175,29 @@ impl Terminal {
+ 
+     /// Retrieves the current VT number.
+     pub fn vt_get_current(&self) -> Result<usize, Error> {
+-        let mut state = ioctl::vt_state {
+-            v_active: 0,
+-            v_signal: 0,
+-            v_state: 0,
++        #[cfg(target_os = "freebsd")]
++        let (res, active) = {
++            let mut active: libc::c_int = 0;
++            let res = unsafe { ioctl::vt_getactive(self.fd, &raw mut active) };
++            (res, active)
++        };
++        #[cfg(not(target_os = "freebsd"))]
++        let (res, active) = {
++            let mut state = ioctl::vt_state {
++                v_active: 0,
++                v_signal: 0,
++                v_state: 0,
++            };
++            let res = unsafe { ioctl::vt_getstate(self.fd, &raw mut state) };
++            (res, state.v_active as libc::c_int)
+         };
+-        let res = unsafe { ioctl::vt_getstate(self.fd, &raw mut state) };
+ 
+         if let Err(v) = res {
+             Err(format!("terminal: unable to get current vt: {v}").into())
+-        } else if state.v_active < 1 {
+-            Err(format!("terminal: current vt invalid: {}", state.v_active).into())
++        } else if active < 1 {
++            Err(format!("terminal: current vt invalid: {active}").into())
+         } else {
+-            Ok(state.v_active as usize)
++            Ok(active as usize)
+         }
+     }
+ 
+@@ -188,7 +205,10 @@ impl Terminal {
+     /// that allocation does not mean exclusivity, and another process may take
+     /// and use the VT before you get to it.
+     pub fn vt_get_next(&self) -> Result<usize, Error> {
++        #[cfg(not(target_os = "freebsd"))]
+         let mut next_vt: i64 = 0;
++        #[cfg(target_os = "freebsd")]
++        let mut next_vt: libc::c_int = 0;
+         let res = unsafe { ioctl::vt_openqry(self.fd, &raw mut next_vt) };
+ 
+         if let Err(v) = res {
+diff --git a/greetd/src/pam/openpam.rs b/greetd/src/pam/openpam.rs
+new file mode 100644
+index 0000000..23cdff2
+--- /dev/null
++++ b/greetd/src/pam/openpam.rs
+@@ -0,0 +1,164 @@
++// OpenPAM's return codes and credential flags differ from Linux-PAM.
++extern crate pam_sys as sys;
++
++use libc::{c_char, c_int};
++use std::ffi::CString;
++
++pub use self::sys::{
++    raw, PamConversation, PamHandle, PamItemType, PamMessage, PamMessageStyle, PamResponse,
++};
++
++#[allow(non_camel_case_types, dead_code)]
++#[derive(Clone, Copy, Debug, PartialEq)]
++#[repr(i32)]
++pub enum PamReturnCode {
++    SUCCESS = 0,
++    OPEN_ERR = 1,
++    SYMBOL_ERR = 2,
++    SERVICE_ERR = 3,
++    SYSTEM_ERR = 4,
++    BUF_ERR = 5,
++    CONV_ERR = 6,
++    PERM_DENIED = 7,
++    MAXTRIES = 8,
++    AUTH_ERR = 9,
++    NEW_AUTHTOK_REQD = 10,
++    CRED_INSUFFICIENT = 11,
++    AUTHINFO_UNAVAIL = 12,
++    USER_UNKNOWN = 13,
++    CRED_UNAVAIL = 14,
++    CRED_EXPIRED = 15,
++    CRED_ERR = 16,
++    ACCT_EXPIRED = 17,
++    AUTHTOK_EXPIRED = 18,
++    SESSION_ERR = 19,
++    AUTHTOK_ERR = 20,
++    AUTHTOK_RECOVERY_ERR = 21,
++    AUTHTOK_LOCK_BUSY = 22,
++    AUTHTOK_DISABLE_AGING = 23,
++    NO_MODULE_DATA = 24,
++    IGNORE = 25,
++    ABORT = 26,
++    TRY_AGAIN = 27,
++    MODULE_UNKNOWN = 28,
++    DOMAIN_UNKNOWN = 29,
++    BAD_HANDLE = 30,
++    BAD_ITEM = 31,
++    BAD_FEATURE = 32,
++    BAD_CONSTANT = 33,
++}
++
++impl From<c_int> for PamReturnCode {
++    fn from(code: c_int) -> Self {
++        match code {
++            0 => Self::SUCCESS,
++            1 => Self::OPEN_ERR,
++            2 => Self::SYMBOL_ERR,
++            3 => Self::SERVICE_ERR,
++            4 => Self::SYSTEM_ERR,
++            5 => Self::BUF_ERR,
++            6 => Self::CONV_ERR,
++            7 => Self::PERM_DENIED,
++            8 => Self::MAXTRIES,
++            9 => Self::AUTH_ERR,
++            10 => Self::NEW_AUTHTOK_REQD,
++            11 => Self::CRED_INSUFFICIENT,
++            12 => Self::AUTHINFO_UNAVAIL,
++            13 => Self::USER_UNKNOWN,
++            14 => Self::CRED_UNAVAIL,
++            15 => Self::CRED_EXPIRED,
++            16 => Self::CRED_ERR,
++            17 => Self::ACCT_EXPIRED,
++            18 => Self::AUTHTOK_EXPIRED,
++            19 => Self::SESSION_ERR,
++            20 => Self::AUTHTOK_ERR,
++            21 => Self::AUTHTOK_RECOVERY_ERR,
++            22 => Self::AUTHTOK_LOCK_BUSY,
++            23 => Self::AUTHTOK_DISABLE_AGING,
++            24 => Self::NO_MODULE_DATA,
++            25 => Self::IGNORE,
++            26 => Self::ABORT,
++            27 => Self::TRY_AGAIN,
++            28 => Self::MODULE_UNKNOWN,
++            29 => Self::DOMAIN_UNKNOWN,
++            30 => Self::BAD_HANDLE,
++            31 => Self::BAD_ITEM,
++            32 => Self::BAD_FEATURE,
++            33 => Self::BAD_CONSTANT,
++            _ => Self::SYSTEM_ERR,
++        }
++    }
++}
++
++#[allow(non_camel_case_types)]
++#[derive(Clone, Copy)]
++#[repr(i32)]
++pub enum PamFlag {
++    NONE = 0,
++    ESTABLISH_CRED = 1,
++    DELETE_CRED = 2,
++    CHANGE_EXPIRED_AUTHTOK = 4,
++}
++
++pub fn start(
++    service: &str,
++    user: Option<&str>,
++    conv: &PamConversation,
++    handle: *mut *mut PamHandle,
++) -> PamReturnCode {
++    let service = match CString::new(service) {
++        Ok(value) => value,
++        Err(_) => return PamReturnCode::SERVICE_ERR,
++    };
++    let user = match user.map(CString::new).transpose() {
++        Ok(value) => value,
++        Err(_) => return PamReturnCode::BUF_ERR,
++    };
++    unsafe {
++        raw::pam_start(
++            service.as_ptr(),
++            user.as_ref().map_or(std::ptr::null(), |u| u.as_ptr()),
++            conv,
++            handle.cast(),
++        )
++        .into()
++    }
++}
++
++macro_rules! pam_call {
++    ($name:ident, $raw:ident) => {
++        pub fn $name(handle: &mut PamHandle, flags: PamFlag) -> PamReturnCode {
++            unsafe { raw::$raw(handle, flags as c_int).into() }
++        }
++    };
++}
++
++pam_call!(authenticate, pam_authenticate);
++pam_call!(acct_mgmt, pam_acct_mgmt);
++pam_call!(chauthtok, pam_chauthtok);
++pam_call!(setcred, pam_setcred);
++pam_call!(open_session, pam_open_session);
++pam_call!(close_session, pam_close_session);
++
++pub fn end(handle: &mut PamHandle, code: PamReturnCode) -> PamReturnCode {
++    unsafe { raw::pam_end(handle, code as c_int).into() }
++}
++
++pub fn putenv(handle: &mut PamHandle, value: &str) -> PamReturnCode {
++    match CString::new(value) {
++        Ok(value) => unsafe { raw::pam_putenv(handle, value.as_ptr()).into() },
++        Err(_) => PamReturnCode::BUF_ERR,
++    }
++}
++
++pub fn get_user(
++    handle: &mut PamHandle,
++    user: *mut *const c_char,
++    prompt: *const c_char,
++) -> PamReturnCode {
++    unsafe { raw::pam_get_user(handle, user, prompt).into() }
++}
++
++pub fn getenvlist(handle: &mut PamHandle) -> *const *const c_char {
++    unsafe { raw::pam_getenvlist(handle) }
++}
+diff --git a/greetd/src/session/freebsd.rs b/greetd/src/session/freebsd.rs
+new file mode 100644
+index 0000000..61b9050
+--- /dev/null
++++ b/greetd/src/session/freebsd.rs
+@@ -0,0 +1,59 @@
++use crate::error::Error;
++use libc::{c_uint, c_void, passwd, uid_t};
++use nix::errno::Errno;
++use std::{
++    env,
++    ffi::{CStr, CString},
++    os::unix::ffi::OsStrExt,
++};
++
++#[link(name = "util")]
++extern "C" {
++    fn setusercontext(
++        lc: *mut c_void,
++        pwd: *const passwd,
++        uid: uid_t,
++        flags: c_uint,
++    ) -> libc::c_int;
++}
++
++pub fn set_user_context(name: &CStr, uid: uid_t, pam_env: &[&CStr]) -> Result<Vec<CString>, Error> {
++    let pwd = unsafe { libc::getpwnam(name.as_ptr()) };
++    if pwd.is_null() {
++        return Err("unable to get user info for login context".into());
++    }
++    // Start with PAM's environment, then apply the user's login.conf settings.
++    for (key, _) in env::vars_os() {
++        env::remove_var(key);
++    }
++    for entry in pam_env {
++        let bytes = entry.to_bytes();
++        if let Some(separator) = bytes.iter().position(|byte| *byte == b'=') {
++            env::set_var(
++                std::ffi::OsStr::from_bytes(&bytes[..separator]),
++                std::ffi::OsStr::from_bytes(&bytes[separator + 1..]),
++            );
++        }
++    }
++    // Groups were set before pam_setcred so PAM can add supplementary groups.
++    const LOGIN_SETALL: c_uint = 0x07ff;
++    const LOGIN_SETGROUP: c_uint = 0x0001;
++    Errno::result(unsafe {
++        setusercontext(
++            std::ptr::null_mut(),
++            pwd,
++            uid,
++            LOGIN_SETALL & !LOGIN_SETGROUP,
++        )
++    })
++    .map(drop)
++    .map_err(|e| Error::Error(format!("unable to set login context: {e}")))?;
++    env::vars_os()
++        .map(|(key, value)| {
++            let mut entry = key.as_bytes().to_vec();
++            entry.push(b'=');
++            entry.extend_from_slice(value.as_bytes());
++            CString::new(entry).map_err(|e| Error::Error(e.to_string()))
++        })
++        .collect()
++}
+diff --git a/greetd/src/terminal/freebsd.rs b/greetd/src/terminal/freebsd.rs
+new file mode 100644
+index 0000000..fb0425f
+--- /dev/null
++++ b/greetd/src/terminal/freebsd.rs
+@@ -0,0 +1,23 @@
++use nix::{ioctl_read_bad, ioctl_write_int_bad, ioctl_write_ptr_bad};
++
++pub const KDTEXT: i32 = 0;
++pub const KDGRAPHICS: i32 = 1;
++pub const VT_AUTO: u8 = 0;
++
++// sys/consio.h uses _IOWINT for integer arguments and _IOR for results.
++ioctl_write_int_bad!(kd_setmode, 0x20044b0a);
++ioctl_write_int_bad!(vt_activate, 0x20047605);
++ioctl_write_int_bad!(vt_waitactive, 0x20047606);
++ioctl_write_ptr_bad!(vt_setmode, 0x80087602, vt_mode);
++ioctl_read_bad!(vt_openqry, 0x40047601, libc::c_int);
++ioctl_read_bad!(vt_getactive, 0x40047607, libc::c_int);
++ioctl_write_int_bad!(term_tiocsctty, libc::TIOCSCTTY);
++
++#[repr(C)]
++pub struct vt_mode {
++    pub mode: u8,
++    pub waitv: u8,
++    pub relsig: u16,
++    pub acqsig: u16,
++    pub frsig: u16,
++}

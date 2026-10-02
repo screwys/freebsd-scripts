@@ -1,0 +1,508 @@
+diff --git a/meson.build b/meson.build
+index 60e9c84..773c182 100644
+--- a/meson.build
++++ b/meson.build
+@@ -44,6 +44,10 @@ tomlplusplus_dep   = dependency('tomlplusplus')
+ nlohmann_dep       = dependency('nlohmann_json')
+ wlroots_dep = dependency('wlroots-0.20')
+ libinput_dep = dependency('libinput')
++timerfd_deps = []
++if host_machine.system() == 'freebsd' and not cc.has_header('sys/timerfd.h')
++  timerfd_deps += dependency('epoll-shim')
++endif
+ 
+ egl_dep = dependency('egl', required: false)
+ gles2_dep = dependency('glesv2', required: false)
+@@ -58,8 +62,11 @@ if not gles2_dep.found()
+ endif
+ 
+ # ── System: stb_image_resize2 (header-only) ─────────────────────────────────
+-if not cc.has_header('stb/stb_image_resize2.h')
+-  error('stb/stb_image_resize2.h not found')
++stb_dep = dependency('stb', required: false)
++stb_deps = stb_dep.found() ? [stb_dep] : []
++if not cpp.has_header('stb/stb_image_resize2.h', dependencies: stb_deps) \
++    and not cpp.has_header('stb_image_resize2.h', dependencies: stb_deps)
++  error('stb_image_resize2.h not found')
+ endif
+ 
+ libwebp_dep = dependency('libwebp', required: true)
+@@ -200,7 +207,7 @@ noctalia_greeter_executable = executable('noctalia-greeter',
+     libwebp_dep,
+     nlohmann_dep,
+     tomlplusplus_dep,
+-  ],
++  ] + stb_deps,
+   include_directories: _greeter_inc,
+   cpp_args: [
+     '-Wall', '-Wextra', '-Wpedantic', '-Wconversion', '-Wshadow',
+@@ -300,7 +307,7 @@ noctalia_greeter_compositor_executable = executable('noctalia-greeter-compositor
+     wayland_server_dep,
+     xkbcommon_dep,
+     tomlplusplus_dep,
+-  ],
++  ] + timerfd_deps,
+   include_directories: include_directories('src'),
+   c_args: [
+     '-Wall', '-Wextra', '-Wpedantic', '-Wconversion',
+diff --git a/scripts/noctalia-greeter-print-greetd-config b/scripts/noctalia-greeter-print-greetd-config
+index f220d3e..3b7deb4 100755
+--- a/scripts/noctalia-greeter-print-greetd-config
++++ b/scripts/noctalia-greeter-print-greetd-config
+@@ -1,3 +1,4 @@
+ #!/usr/bin/env sh
+ set -eu
+-exec /usr/share/noctalia-greeter/print_greetd_config.sh "$@"
++_bindir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
++exec "${_bindir}/../share/noctalia-greeter/print_greetd_config.sh" "$@"
+diff --git a/scripts/noctalia-greeter-session b/scripts/noctalia-greeter-session
+index 0363487..0ea6104 100755
+--- a/scripts/noctalia-greeter-session
++++ b/scripts/noctalia-greeter-session
+@@ -40,10 +40,15 @@ echo "NOCTALIA_GREETER_LOG=${NOCTALIA_GREETER_LOG:-syslog (fds parked)}"
+ echo "GREETD_SOCK=${GREETD_SOCK:-unset}"
+ 
+ _pam_runtime="${XDG_RUNTIME_DIR:-unset}"
+-XDG_RUNTIME_DIR="/tmp/noctalia-runtime-$(id -u)"
++case "$(uname -s)" in
++FreeBSD) : "${XDG_RUNTIME_DIR:?pam_xdg must set XDG_RUNTIME_DIR for the greeter session}" ;;
++*)
++  XDG_RUNTIME_DIR="/tmp/noctalia-runtime-$(id -u)"
++  mkdir -p "${XDG_RUNTIME_DIR}"
++  chmod 700 "${XDG_RUNTIME_DIR}"
++  ;;
++esac
+ export XDG_RUNTIME_DIR
+-mkdir -p "${XDG_RUNTIME_DIR}"
+-chmod 700 "${XDG_RUNTIME_DIR}"
+ 
+ echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR} (pam=${_pam_runtime})"
+ echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset}"
+diff --git a/src/core/log.cpp b/src/core/log.cpp
+index ad3d29a..b1c2486 100644
+--- a/src/core/log.cpp
++++ b/src/core/log.cpp
+@@ -1,4 +1,5 @@
+ #include "core/log.h"
++#include "core/executable_path.h"
+ 
+ #include <cctype>
+ #include <cerrno>
+@@ -174,7 +175,7 @@ namespace {
+ 
+ void emergencyLogBootstrap(int argc, char* argv[]) {
+   char exePath[512] = {};
+-  const ssize_t exeLen = ::readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
++  const ssize_t exeLen = paths::readExecutablePath(exePath, sizeof(exePath) - 1);
+ 
+   std::ostringstream msg;
+   msg << "=== noctalia-greeter bootstrap pid=" << ::getpid() << " uid=" << ::getuid() << " euid=" << ::geteuid();
+diff --git a/src/core/resource_paths.cpp b/src/core/resource_paths.cpp
+index 9757c84..070fdce 100644
+--- a/src/core/resource_paths.cpp
++++ b/src/core/resource_paths.cpp
+@@ -1,6 +1,7 @@
+ #include "core/resource_paths.h"
+ 
+ #include "core/log.h"
++#include "core/executable_path.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -19,7 +20,7 @@ namespace paths {
+ 
+     std::optional<std::filesystem::path> executablePath() {
+       std::array<char, 4096> buffer{};
+-      const ssize_t count = ::readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
++      const ssize_t count = paths::readExecutablePath(buffer.data(), buffer.size() - 1);
+       if (count <= 0 || static_cast<std::size_t>(count) >= buffer.size() - 1) {
+         return std::nullopt;
+       }
+diff --git a/src/greeter/greetd_user.cpp b/src/greeter/greetd_user.cpp
+index fde341a..f94135a 100644
+--- a/src/greeter/greetd_user.cpp
++++ b/src/greeter/greetd_user.cpp
+@@ -136,7 +136,11 @@ namespace {
+     if (const char* env = std::getenv("GREETD_CONFIG"); env != nullptr && env[0] != '\0') {
+       paths.emplace_back(env);
+     }
++#if defined(__FreeBSD__)
++    paths.emplace_back("/usr/local/etc/greetd/config.toml");
++#else
+     paths.emplace_back("/etc/greetd/config.toml");
++#endif
+     return paths;
+   }
+ 
+diff --git a/src/greeter/greeter.cpp b/src/greeter/greeter.cpp
+index e8179e4..c904ca6 100644
+--- a/src/greeter/greeter.cpp
++++ b/src/greeter/greeter.cpp
+@@ -436,7 +436,11 @@ Greeter::View* Greeter::viewForSurface(wl_surface* surface) noexcept {
+ 
+ void Greeter::connectGreetd() {
+   const char* sockPath = std::getenv("GREETD_SOCK");
++#if defined(__FreeBSD__)
++  std::string path = sockPath ? sockPath : "/var/run/greetd/server.sock";
++#else
+   std::string path = sockPath ? sockPath : "/run/greetd/server.sock";
++#endif
+ 
+   if (!m_greetdClient.connect(path)) {
+     kLog.error("failed to connect to greetd at {}", path);
+diff --git a/src/greeter/greeter_surface.cpp b/src/greeter/greeter_surface.cpp
+index 1e709b1..506a02b 100644
+--- a/src/greeter/greeter_surface.cpp
++++ b/src/greeter/greeter_surface.cpp
+@@ -39,7 +39,11 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <filesystem>
++#if defined(__FreeBSD__)
++#include <dev/evdev/input-event-codes.h>
++#else
+ #include <linux/input-event-codes.h>
++#endif
+ #include <nlohmann/json.hpp>
+ #include <pwd.h>
+ #include <sstream>
+diff --git a/src/render/core/image_file_loader.cpp b/src/render/core/image_file_loader.cpp
+index 3db5cbc..04e72fa 100644
+--- a/src/render/core/image_file_loader.cpp
++++ b/src/render/core/image_file_loader.cpp
+@@ -10,7 +10,11 @@
+ #include <cstring>
+ 
+ #define STB_IMAGE_RESIZE_IMPLEMENTATION
++#if __has_include(<stb/stb_image_resize2.h>)
+ #include <stb/stb_image_resize2.h>
++#else
++#include <stb_image_resize2.h>
++#endif
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wexpansion-to-defined"
+ #include <librsvg/rsvg.h>
+diff --git a/src/tools/passwordless_sync_policy.cpp b/src/tools/passwordless_sync_policy.cpp
+index bfffee7..31b5e16 100644
+--- a/src/tools/passwordless_sync_policy.cpp
++++ b/src/tools/passwordless_sync_policy.cpp
+@@ -1,6 +1,7 @@
+ #include "tools/passwordless_sync_policy.h"
+ 
+ #include "tools/passwordless_sync_policy_xml.h"
++#include "core/executable_path.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -13,7 +14,9 @@
+ #include <fcntl.h>
+ #include <filesystem>
+ #include <iostream>
++#if defined(__linux__)
+ #include <linux/magic.h>
++#endif
+ #include <nlohmann/json.hpp>
+ #include <optional>
+ #include <poll.h>
+@@ -23,7 +26,11 @@
+ #include <sys/file.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#if defined(__FreeBSD__)
++#include <sys/mount.h>
++#else
+ #include <sys/vfs.h>
++#endif
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #include <vector>
+@@ -32,9 +39,14 @@ namespace greeter::passwordless_sync {
+ 
+   namespace {
+ 
++#if defined(__FreeBSD__)
++    constexpr char kRulesDirectory[] = "/usr/local/etc/polkit-1/rules.d";
++    constexpr char kLockPath[] = "/var/run/noctalia-greeter-passwordless-sync.lock";
++#else
+     constexpr char kRulesDirectory[] = "/etc/polkit-1/rules.d";
+-    constexpr char kManagedRuleName[] = "49-noctalia-greeter-passwordless-sync.rules";
+     constexpr char kLockPath[] = "/run/noctalia-greeter-passwordless-sync.lock";
++#endif
++    constexpr char kManagedRuleName[] = "49-noctalia-greeter-passwordless-sync.rules";
+     constexpr char kApplyHelperName[] = "noctalia-greeter-apply-appearance";
+     constexpr char kActionId[] = "org.noctalia.greeter.sync-appearance";
+     constexpr char kSecureSyncCapability[] = "secure-sync-v1";
+@@ -225,7 +237,11 @@ namespace greeter::passwordless_sync {
+       if (::statfs(directory.c_str(), &filesystemState) != 0) {
+         return setErrnoError(std::string("failed to inspect ") + std::string(description) + " filesystem", errorOut);
+       }
++#if defined(__FreeBSD__)
++      if (std::string_view(filesystemState.f_fstypename) == "fusefs") {
++#else
+       if (filesystemState.f_type == FUSE_SUPER_MAGIC) {
++#endif
+         errorOut = std::string(description) + " must not be stored on FUSE";
+         return false;
+       }
+@@ -262,7 +278,11 @@ namespace greeter::passwordless_sync {
+       if (::statfs(canonical.c_str(), &filesystemState) != 0) {
+         return setErrnoError("failed to inspect executable filesystem", errorOut);
+       }
++#if defined(__FreeBSD__)
++      if (std::string_view(filesystemState.f_fstypename) == "fusefs") {
++#else
+       if (filesystemState.f_type == FUSE_SUPER_MAGIC) {
++#endif
+         errorOut = "executable '" + canonical.string() + "' must not be stored on FUSE";
+         return false;
+       }
+@@ -789,7 +809,12 @@ namespace greeter::passwordless_sync {
+ 
+     [[nodiscard]] bool validateInstalledSync(std::string& helperOut, std::string& errorOut) {
+       std::error_code ec;
+-      const std::filesystem::path self = std::filesystem::canonical("/proc/self/exe", ec);
++      std::array<char, 4096> executable{};
++      const ssize_t count = paths::readExecutablePath(executable.data(), executable.size() - 1);
++      if (count <= 0 || static_cast<std::size_t>(count) >= executable.size() - 1) {
++        return setErrnoError("failed to resolve the installed noctalia-greeter executable", errorOut);
++      }
++      const std::filesystem::path self = std::filesystem::canonical(executable.data(), ec);
+       if (ec) {
+         errorOut = "failed to resolve the installed noctalia-greeter executable: " + ec.message();
+         return false;
+diff --git a/src/tools/secure_appearance_sync.cpp b/src/tools/secure_appearance_sync.cpp
+index e0c8309..6d2b975 100644
+--- a/src/tools/secure_appearance_sync.cpp
++++ b/src/tools/secure_appearance_sync.cpp
+@@ -18,7 +18,9 @@
+ #include <fstream>
+ #include <grp.h>
+ #include <limits>
++#if defined(__linux__)
+ #include <linux/magic.h>
++#endif
+ #include <optional>
+ #include <pwd.h>
+ #include <string>
+@@ -26,7 +28,11 @@
+ #include <sys/file.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#if defined(__FreeBSD__)
++#include <sys/mount.h>
++#else
+ #include <sys/vfs.h>
++#endif
+ #include <unistd.h>
+ #include <unordered_set>
+ #include <vector>
+@@ -36,7 +42,13 @@ namespace greeter::secure_sync {
+   namespace {
+ 
+     constexpr std::string_view kStagingDirectoryName = "noctalia-greeter-sync";
++#if defined(__FreeBSD__)
++    constexpr std::string_view kRuntimeParentPath = "/var/run/xdg";
++    constexpr std::string_view kSyncLockPath = "/var/run/noctalia-greeter-sync.lock";
++#else
++    constexpr std::string_view kRuntimeParentPath = "/run/user";
+     constexpr std::string_view kSyncLockPath = "/run/noctalia-greeter-sync.lock";
++#endif
+     constexpr std::uint64_t kConfigSizeLimit = 256U * 1024U;
+     // greeter_compositor_config stores each serialized output value in a 2048-byte buffer.
+     constexpr std::uint64_t kOutputMetadataSizeLimit = 2047U;
+@@ -300,6 +312,10 @@ namespace greeter::secure_sync {
+       }
+ 
+       const std::string uidComponent = requestedPath.parent_path().filename().string();
++#if defined(__FreeBSD__)
++      const struct passwd* account = ::getpwnam(uidComponent.c_str());
++      return account != nullptr ? std::optional<uid_t>(account->pw_uid) : std::nullopt;
++#else
+       std::uintmax_t parsed = 0;
+       const char* begin = uidComponent.data();
+       const char* end = begin + uidComponent.size();
+@@ -313,6 +329,19 @@ namespace greeter::secure_sync {
+         return std::nullopt;
+       }
+       return uid;
++#endif
++    }
++
++    [[nodiscard]] std::optional<std::string> runtimeDirectoryName(const uid_t uid) {
++#if defined(__FreeBSD__)
++      const struct passwd* account = ::getpwuid(uid);
++      if (account == nullptr || account->pw_name == nullptr) {
++        return std::nullopt;
++      }
++      return std::string(account->pw_name);
++#else
++      return std::to_string(uid);
++#endif
+     }
+ 
+     [[nodiscard]] bool openPrivateRuntimeStaging(
+@@ -320,7 +349,12 @@ namespace greeter::secure_sync {
+         const std::filesystem::path& requestedPath, const uid_t callerUid,
+         const WritableEntryPolicy writableEntryPolicy, UniqueFd& stagingOut, std::string& errorOut
+     ) {
+-      const std::filesystem::path runtimePath = runtimeParentPath / std::to_string(callerUid);
++      const auto runtimeName = runtimeDirectoryName(callerUid);
++      if (!runtimeName.has_value()) {
++        errorOut = "caller UID has no account record";
++        return false;
++      }
++      const std::filesystem::path runtimePath = runtimeParentPath / *runtimeName;
+       const std::filesystem::path expectedPath = runtimePath / kStagingDirectoryName;
+       if (requestedPath != expectedPath) {
+         errorOut = "sync staging directory must be '" + expectedPath.string() + "'";
+@@ -342,9 +376,8 @@ namespace greeter::secure_sync {
+         return false;
+       }
+ 
+-      const std::string runtimeName = std::to_string(callerUid);
+       UniqueFd runtimeDir(
+-          ::openat(runtimeParent.get(), runtimeName.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
++          ::openat(runtimeParent.get(), runtimeName->c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+       );
+       if (!runtimeDir.valid()) {
+         return setErrnoError("failed to open the caller runtime directory", errorOut);
+@@ -362,7 +395,11 @@ namespace greeter::secure_sync {
+       if (::fstatfs(runtimeDir.get(), &runtimeFilesystem) != 0) {
+         return setErrnoError("failed to inspect the caller runtime filesystem", errorOut);
+       }
++#if defined(__FreeBSD__)
++      if (std::string_view(runtimeFilesystem.f_fstypename) == "fusefs") {
++#else
+       if (runtimeFilesystem.f_type == FUSE_SUPER_MAGIC) {
++#endif
+         errorOut = "caller runtime directory must not reside on a FUSE filesystem";
+         return false;
+       }
+@@ -399,14 +436,19 @@ namespace greeter::secure_sync {
+     [[nodiscard]] bool openCallerStaging(
+         const std::filesystem::path& requestedPath, const uid_t callerUid, UniqueFd& stagingOut, std::string& errorOut
+     ) {
++      const auto runtimeName = runtimeDirectoryName(callerUid);
++      if (!runtimeName.has_value()) {
++        errorOut = "caller UID has no account record";
++        return false;
++      }
+       const std::filesystem::path expectedPath =
+-          std::filesystem::path("/run/user") / std::to_string(callerUid) / kStagingDirectoryName;
++          std::filesystem::path(kRuntimeParentPath) / *runtimeName / kStagingDirectoryName;
+       if (requestedPath != expectedPath) {
+         errorOut = "--sync staging directory must be '" + expectedPath.string() + "'";
+         return false;
+       }
+       return openPrivateRuntimeStaging(
+-          "/run/user", 0, requestedPath, callerUid, WritableEntryPolicy::Reject, stagingOut, errorOut
++          kRuntimeParentPath, 0, requestedPath, callerUid, WritableEntryPolicy::Reject, stagingOut, errorOut
+       );
+     }
+ 
+@@ -454,7 +496,11 @@ namespace greeter::secure_sync {
+       if (::fstatfs(staging.get(), &filesystemState) != 0) {
+         return setErrnoError("failed to inspect the legacy sync staging filesystem", errorOut);
+       }
++#if defined(__FreeBSD__)
++      if (std::string_view(filesystemState.f_fstypename) == "fusefs") {
++#else
+       if (filesystemState.f_type == FUSE_SUPER_MAGIC) {
++#endif
+         errorOut = "legacy sync staging directory must not reside on a FUSE filesystem";
+         return false;
+       }
+@@ -479,7 +525,7 @@ namespace greeter::secure_sync {
+         return false;
+       }
+       return openLegacyStagingWithContext(
+-          requestedPath, "/run/user", 0, invokingUid, stagingOut, ownerOut, writableEntryPolicyOut, errorOut
++          requestedPath, kRuntimeParentPath, 0, invokingUid, stagingOut, ownerOut, writableEntryPolicyOut, errorOut
+       );
+     }
+ 
+diff --git a/src/ui/controls/button.cpp b/src/ui/controls/button.cpp
+index 8f46bb6..1f5b4be 100644
+--- a/src/ui/controls/button.cpp
++++ b/src/ui/controls/button.cpp
+@@ -9,7 +9,11 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#if defined(__FreeBSD__)
++#include <dev/evdev/input-event-codes.h>
++#else
+ #include <linux/input-event-codes.h>
++#endif
+ #include <memory>
+ 
+ namespace {
+diff --git a/src/ui/controls/input.cpp b/src/ui/controls/input.cpp
+index 081eec0..ff5c17e 100644
+--- a/src/ui/controls/input.cpp
++++ b/src/ui/controls/input.cpp
+@@ -13,7 +13,11 @@
+ #include <array>
+ #include <cctype>
+ #include <cmath>
++#if defined(__FreeBSD__)
++#include <dev/evdev/input-event-codes.h>
++#else
+ #include <linux/input-event-codes.h>
++#endif
+ #include <xkbcommon/xkbcommon-keysyms.h>
+ 
+ namespace {
+diff --git a/src/wayland/wayland_seat.cpp b/src/wayland/wayland_seat.cpp
+index a080924..fd7551d 100644
+--- a/src/wayland/wayland_seat.cpp
++++ b/src/wayland/wayland_seat.cpp
+@@ -6,7 +6,11 @@
+ #include <algorithm>
+ #include <clocale>
+ #include <cstring>
++#if defined(__FreeBSD__)
++#include <dev/evdev/input-event-codes.h>
++#else
+ #include <linux/input-event-codes.h>
++#endif
+ #include <sys/mman.h>
+ #include <unistd.h>
+ #include <wayland-client.h>
+diff --git a/src/core/executable_path.h b/src/core/executable_path.h
+new file mode 100644
+index 0000000..f867158
+--- /dev/null
++++ b/src/core/executable_path.h
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <cerrno>
++#include <cstddef>
++#include <unistd.h>
++
++#if defined(__FreeBSD__)
++#include <sys/types.h>
++#include <sys/sysctl.h>
++#endif
++
++namespace paths {
++
++  inline ssize_t readExecutablePath(char* buffer, std::size_t capacity) {
++#if defined(__FreeBSD__)
++    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
++    std::size_t size = capacity;
++    if (::sysctl(mib, 4, buffer, &size, nullptr, 0) != 0) {
++      return -1;
++    }
++    if (size <= 1 || buffer[0] == '\0') {
++      errno = ENOENT;
++      return -1;
++    }
++    return static_cast<ssize_t>(size - 1);
++#else
++    return ::readlink("/proc/self/exe", buffer, capacity);
++#endif
++  }
++
++} // namespace paths

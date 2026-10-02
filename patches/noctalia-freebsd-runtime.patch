@@ -1,0 +1,30 @@
+diff --git a/src/shell/greeter/greeter_appearance_sync.cpp b/src/shell/greeter/greeter_appearance_sync.cpp
+index b8c5530..60d5d04 100644
+--- a/src/shell/greeter/greeter_appearance_sync.cpp
++++ b/src/shell/greeter/greeter_appearance_sync.cpp
+@@ -1,5 +1,8 @@
+ #include "shell/greeter/greeter_appearance_sync.h"
+ 
++#if defined(__FreeBSD__)
++#include "auth/pam_authenticator.h"
++#endif
+ #include "compositors/compositor_platform.h"
+ #include "config/config_service.h"
+ #include "config/config_types.h"
+@@ -363,7 +366,16 @@ namespace {
+     std::filesystem::path runtimeDirectory;
+     if (mode == GreeterSyncMode::Constrained) {
+       // The secure helper accepts only this lexical path, derived from PKEXEC_UID.
++#if defined(__FreeBSD__)
++      const std::string username = PamAuthenticator::currentUsername();
++      if (username.empty()) {
++        kLog.warn("failed to resolve the current account for greeter sync");
++        return {};
++      }
++      runtimeDirectory = std::filesystem::path("/var/run/xdg") / username;
++#else
+       runtimeDirectory = std::filesystem::path("/run/user") / std::to_string(::getuid());
++#endif
+     } else {
+       const char* runtimeDir = std::getenv("XDG_RUNTIME_DIR");
+       runtimeDirectory = runtimeDir != nullptr && runtimeDir[0] != '\0' ? std::filesystem::path(runtimeDir)

@@ -1,0 +1,45 @@
+name: Temporary FreeBSD greeter check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/noctalia-greeter-freebsd]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temporary-greeter-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-login:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Build and log in on FreeBSD
+        uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
+        with:
+          release: '15.1'
+          arch: x86_64
+          usesh: true
+          mem: 8192
+          cpu: 2
+          copyback: true
+          prepare: |
+            env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
+            mkdir -p /usr/local/etc/pkg/repos
+            printf '%s\n' 'FreeBSD: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }' > /usr/local/etc/pkg/repos/FreeBSD.conf
+            pkg update -f
+            pkg install -y python3 jq xorg-vfbserver xdotool mesa-dri mesa-libs
+          run: |
+            sh tests/temporary-greeter-build.sh
+      - name: Save synthetic CI reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-greeter-reports
+          path: ci-reports/
+          if-no-files-found: ignore
+          retention-days: 3

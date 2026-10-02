@@ -7,7 +7,7 @@ TARGET=/
 INSTALL_USER=${INSTALL_USER:-}
 PKG_BRANCH=${PKG_BRANCH:-latest}
 GPU_MODULE=${GPU_MODULE:-auto}
-COMPONENTS=${INSTALL_COMPONENTS-'tools dev gnome niri browsers zed media kde apps japanese gpu'}
+COMPONENTS=${INSTALL_COMPONENTS-'tools dev gnome niri greeter browsers zed media kde apps japanese gpu'}
 DRY_RUN=0
 VALIDATE_ONLY=0
 BSDINSTALL_GUIDED=0
@@ -16,6 +16,10 @@ EDITOR_CMD=nano
 FAILED_INSTALLS=
 # Native FreeBSD support lives on upstream's feat/freebsd branch.
 NOCTALIA_REF=77552410fd1ca63811efc8960f11cf4765e0c9b1
+GREETD_REF=d6733e983ff7821c3044007d5555345c7553188f
+NOCTALIA_GREETER_REF=44337ecba043749c29de6f3d563315b91987a908
+INSTALL_SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+INSTALL_PATCH_DIR=${INSTALL_PATCH_DIR:-$INSTALL_SOURCE_DIR/patches}
 # This snapshot still includes Vesktop and Electron 40.
 APP_PORTS_REF=596ce5964e00f1b40fb5bee30beea9268477a591
 LAZYVIM_REF=803bc181d7c0d6d5eeba9274d9be49b287294d99
@@ -207,6 +211,32 @@ libjxl
 libsndfile
 '
 
+GREETER_BUILD_PACKAGES='
+meson
+ninja
+pkgconf
+wayland
+wayland-protocols
+wlroots020
+libinput
+libepoxy
+freetype2
+fontconfig
+cairo
+pango
+harfbuzz
+librsvg2-rust
+libxkbcommon
+glib
+tomlplusplus
+nlohmann-json
+stb
+webp
+libxml2
+libepoll-shim
+seatd
+'
+
 log()
 {
 	printf '%s\n' "==> $*"
@@ -348,12 +378,13 @@ select_components()
 	tty -s 2>/dev/null </dev/tty || die "--tui needs an interactive terminal"
 	if choices=$(bsddialog --clear --title "FreeBSD desktop setup" \
 		--output-fd 3 --separate-output \
-		--checklist "Space toggles [X]. Enter installs the selected groups.\nBasic tools are always installed." \
+		--checklist "Space toggles selections. Basic tools are always installed." \
 		0 0 0 \
 		tools "CLI tools + Neovim + LazyVim" on \
 		dev "Compilers, language servers, Android tools" on \
 		gnome "GNOME + Ghostty" on \
 		niri "Niri + Noctalia v5 + Ghostty" on \
+		greeter "Noctalia login screen" on \
 		browsers "Firefox, LibreWolf, Chromium binaries" on \
 		zed "Zed editor" on \
 		media "Media and recording apps" on \
@@ -629,7 +660,7 @@ package_manifest()
 {
 	{
 		printf '%s\n' "$BASE_PACKAGES"
-		if selected gnome || selected niri; then
+		if selected gnome || selected niri || selected greeter; then
 			printf '%s\n' "$DESKTOP_PACKAGES"
 		fi
 		for component in $COMPONENTS; do
@@ -645,6 +676,7 @@ package_manifest()
 				japanese) printf '%s\n' "$JAPANESE_PACKAGES" ;;
 				gpu) gpu_package_manifest ;;
 				zed) printf '%s\n' zed-editor ;;
+				greeter) ;;
 				*) die "unknown component: $component" ;;
 			esac
 		done
@@ -802,16 +834,85 @@ fi
 EOF
 }
 
+install_greetd()
+{
+	selected greeter || return 0
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would build and install greetd revision $GREETD_REF for FreeBSD"
+		return 0
+	fi
+	set -- /bin/sh -s -- "$GREETD_REF" "$INSTALL_PATCH_DIR/greetd-freebsd.patch" \
+		"${INSTALL_URL%/*}/patches/greetd-freebsd.patch"
+	if [ "$TARGET" != "/" ]; then
+		set -- chroot "$TARGET" "$@"
+	fi
+	try_install "greetd" "$@" <<'EOF'
+set -eu
+env ASSUME_ALWAYS_YES=yes pkg install -y rust
+build_root=$(mktemp -d)
+trap 'rm -rf "$build_root"' EXIT HUP INT TERM
+git init "$build_root/source"
+git -C "$build_root/source" remote add origin https://github.com/kennylevinsen/greetd.git
+git -C "$build_root/source" fetch --depth 1 origin "$1"
+git -C "$build_root/source" checkout --detach FETCH_HEAD
+patch_file=$2
+if [ ! -r "$patch_file" ]; then
+	patch_file="$build_root/freebsd.patch"
+	fetch -o "$patch_file" "$3"
+fi
+git -C "$build_root/source" apply "$patch_file"
+cd "$build_root/source"
+cargo build --locked --release -p greetd -p agreety -j "${BUILD_JOBS:-2}"
+install -m 0755 target/release/greetd target/release/agreety /usr/local/bin/
+EOF
+}
+
+install_noctalia_greeter()
+{
+	selected greeter || return 0
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would build and install Noctalia Greeter revision $NOCTALIA_GREETER_REF for FreeBSD"
+		return 0
+	fi
+	set -- /bin/sh -s -- "$NOCTALIA_GREETER_REF" "$GREETER_BUILD_PACKAGES" \
+		"$INSTALL_PATCH_DIR/noctalia-greeter-freebsd.patch" \
+		"${INSTALL_URL%/*}/patches/noctalia-greeter-freebsd.patch"
+	if [ "$TARGET" != "/" ]; then
+		set -- chroot "$TARGET" "$@"
+	fi
+	try_install "Noctalia Greeter" "$@" <<'EOF'
+set -eu
+set -f
+# shellcheck disable=SC2086
+env ASSUME_ALWAYS_YES=yes pkg install -y $2
+build_root=$(mktemp -d)
+trap 'rm -rf "$build_root"' EXIT HUP INT TERM
+git init "$build_root/source"
+git -C "$build_root/source" remote add origin https://github.com/noctalia-dev/noctalia-greeter.git
+git -C "$build_root/source" fetch --depth 1 origin "$1"
+git -C "$build_root/source" checkout --detach FETCH_HEAD
+patch_file=$3
+if [ ! -r "$patch_file" ]; then
+	patch_file="$build_root/freebsd.patch"
+	fetch -o "$patch_file" "$4"
+fi
+git -C "$build_root/source" apply "$patch_file"
+meson setup "$build_root/build" "$build_root/source" --prefix=/usr/local --buildtype=plain
+meson compile -C "$build_root/build" -j "${BUILD_JOBS:-2}"
+meson install -C "$build_root/build"
+EOF
+}
+
 configure_rc_conf()
 {
 	rc=$(target_path /etc/rc.conf)
 
 	set_conf_value "$rc" dbus_enable YES
-	if selected gnome || selected niri; then
+	if selected gnome || selected niri || selected greeter; then
 		set_conf_value "$rc" gdm_enable YES
 		set_conf_value "$rc" xdg_runtime_base_enable YES
 	fi
-	if selected niri; then
+	if selected niri || selected greeter; then
 		set_conf_value "$rc" seatd_enable YES
 	fi
 	set_conf_value "$rc" powerd_enable YES
@@ -916,7 +1017,7 @@ configure_xdg_runtime_rc()
 
 # PROVIDE: xdg_runtime_base
 # REQUIRE: LOGIN
-# BEFORE: gdm
+# BEFORE: gdm greetd
 
 . /etc/rc.subr
 
@@ -950,6 +1051,14 @@ export XDG_SESSION_TYPE=wayland
 export QT_QPA_PLATFORM=wayland
 export GDK_BACKEND=wayland,x11
 
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+	export XDG_RUNTIME_DIR="/var/run/user/$(id -u)"
+	mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+fi
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+	exec dbus-run-session -- /usr/local/bin/niri --session
+fi
 exec /usr/local/bin/niri --session
 EOF
 
@@ -961,6 +1070,121 @@ Exec=/usr/local/bin/freebsd-niri-session
 Type=Application
 DesktopNames=niri
 EOF
+}
+
+configure_greeter()
+{
+	selected greeter || return 0
+
+	write_file "$(target_path /usr/local/etc/greetd/config.toml)" 0644 <<'EOF'
+[terminal]
+vt = 9
+
+[general]
+source_profile = true
+runfile = "/var/run/greetd.run"
+service = "greetd"
+
+[default_session]
+command = "/usr/local/bin/freebsd-noctalia-greeter-session"
+user = "greetd"
+service = "greetd-greeter"
+EOF
+
+	write_file "$(target_path /etc/pam.d/greetd)" 0644 <<'EOF'
+auth      requisite pam_nologin.so
+auth      include   system
+account   include   system
+session   include   system
+password  include   system
+EOF
+
+	write_file "$(target_path /etc/pam.d/greetd-greeter)" 0644 <<'EOF'
+auth      required  pam_permit.so
+account   include   system
+session   include   system
+EOF
+
+	write_file "$(target_path /usr/local/bin/freebsd-noctalia-greeter-session)" 0755 <<'EOF'
+#!/bin/sh
+set -eu
+export GREETD_CONFIG=/usr/local/etc/greetd/config.toml
+export GREETER_USER=greetd
+exec /usr/local/bin/noctalia-greeter-session "$@"
+EOF
+
+	write_file "$(target_path /usr/local/etc/rc.d/greetd)" 0755 <<'EOF'
+#!/bin/sh
+
+# PROVIDE: greetd
+# REQUIRE: LOGIN dbus seatd xdg_runtime_base
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name=greetd
+rcvar=greetd_enable
+command=/usr/sbin/daemon
+procname=/usr/local/bin/greetd
+pidfile=/var/run/greetd.pid
+command_args="-p $pidfile -f -S -T greetd /usr/local/bin/greetd -c /usr/local/etc/greetd/config.toml"
+
+load_rc_config $name
+: ${greetd_enable:=NO}
+run_rc_command "$1"
+EOF
+
+	greeter_config=$(target_path /var/lib/noctalia-greeter/greeter.toml)
+	if [ ! -e "$greeter_config" ]; then
+		write_file "$greeter_config" 0644 <<'EOF'
+[session]
+default = "Niri"
+EOF
+	fi
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "would create greetd account and prepare Noctalia Greeter state"
+	else
+		if ! user_record greetd >/dev/null 2>&1; then
+			run_in_target "pw useradd greetd -m -d /var/lib/greetd -s /usr/sbin/nologin -c 'Noctalia Greeter'"
+		fi
+		for group in video operator seatd _seatd; do
+			if group_exists "$group"; then
+				run_in_target "pw groupmod '$group' -m greetd"
+			fi
+		done
+		greeter_uid=$(user_field greetd 3)
+		greeter_gid=$(user_field greetd 4)
+		mkdir -p "$(target_path /var/lib/greetd)" "$(target_path /var/lib/noctalia-greeter)"
+		chown "$greeter_uid:$greeter_gid" "$(target_path /var/lib/greetd)" \
+			"$(target_path /var/lib/noctalia-greeter)" "$greeter_config"
+	fi
+
+	# Keep the existing login manager when a greeter build failed.
+	if [ "$DRY_RUN" -eq 1 ] ||
+		{ [ -x "$(target_path /usr/local/bin/greetd)" ] &&
+		  [ -x "$(target_path /usr/local/bin/noctalia-greeter)" ] &&
+		  [ -x "$(target_path /usr/local/bin/noctalia-greeter-compositor)" ]; }; then
+		set_conf_value "$(target_path /etc/rc.conf)" greetd_enable YES
+		set_conf_value "$(target_path /etc/rc.conf)" gdm_enable NO
+		if [ "$DRY_RUN" -eq 1 ]; then
+			log "would disable getty on ttyv8 for Noctalia Greeter"
+		else
+			ttys=$(target_path /etc/ttys)
+			ttys_tmp="$ttys.tmp.$$"
+			awk '
+				$1 == "ttyv8" {
+					for (i = 2; i <= NF; i++) {
+						if ($i == "on" || $i == "onifexists" || $i == "onifconsole") $i = "off"
+					}
+				}
+				{ print }
+			' "$ttys" >"$ttys_tmp"
+			mv "$ttys_tmp" "$ttys"
+		fi
+	else
+		warn "Noctalia Greeter is not installed; keeping GDM enabled"
+	fi
 }
 
 passwd_file()
@@ -1265,6 +1489,8 @@ install_noctalia()
 
 	log "building Noctalia v5 upstream FreeBSD revision $NOCTALIA_REF"
 	set -- /bin/sh -s -- "$NOCTALIA_REF" "$NOCTALIA_BUILD_PACKAGES"
+	set -- "$@" "$INSTALL_PATCH_DIR/noctalia-freebsd-runtime.patch" \
+		"${INSTALL_URL%/*}/patches/noctalia-freebsd-runtime.patch"
 	if [ "$TARGET" != "/" ]; then
 		set -- chroot "$TARGET" "$@"
 	fi
@@ -1283,9 +1509,15 @@ git init "$build_root/source"
 git -C "$build_root/source" remote add origin https://github.com/noctalia-dev/noctalia.git
 git -C "$build_root/source" fetch --depth 1 origin "$ref"
 git -C "$build_root/source" checkout --detach FETCH_HEAD
+patch_file=$3
+if [ ! -r "$patch_file" ]; then
+	patch_file="$build_root/freebsd.patch"
+	fetch -o "$patch_file" "$4"
+fi
+git -C "$build_root/source" apply "$patch_file"
 meson setup "$build_root/build" "$build_root/source" --prefix=/usr/local \
 	--buildtype=release -Dtests=disabled -Djemalloc=disabled
-meson compile -C "$build_root/build"
+meson compile -C "$build_root/build" -j "${BUILD_JOBS:-2}"
 meson install -C "$build_root/build"
 EOF
 }
@@ -1489,7 +1721,7 @@ validate_manifest()
 {
 	for component in $COMPONENTS; do
 		case "$component" in
-			tools|dev|gnome|niri|browsers|zed|media|kde|apps|japanese|gpu) ;;
+			tools|dev|gnome|niri|greeter|browsers|zed|media|kde|apps|japanese|gpu) ;;
 			*) die "unknown component: $component" ;;
 		esac
 	done
@@ -1499,7 +1731,7 @@ validate_manifest()
 		die "package manifest contains duplicates"
 	fi
 
-	printf '%s\n%s\n' "$(package_manifest)" "$NOCTALIA_BUILD_PACKAGES" | awk '
+	printf '%s\n%s\n%s\n' "$(package_manifest)" "$NOCTALIA_BUILD_PACKAGES" "$GREETER_BUILD_PACKAGES" | awk '
 		!NF { next }
 		$0 !~ /^[A-Za-z0-9_.+@-]+$/ {
 			printf "bad package name: %s\n", $0 > "/dev/stderr"
@@ -1636,12 +1868,14 @@ main()
 		install_ports "$APP_PORTS_REF" "net-im/signal-desktop net-im/vesktop"
 	fi
 	install_noctalia
+	install_greetd
+	install_noctalia_greeter
 	configure_rc_conf
 	configure_gpu_driver
 	configure_hardening
 	configure_mounts
 	configure_doas_and_editor
-	if selected gnome || selected niri; then
+	if selected gnome || selected niri || selected greeter; then
 		configure_xdg_runtime_rc
 	fi
 	if selected niri; then
@@ -1654,6 +1888,7 @@ main()
 	configure_user_files
 	configure_lazyvim
 	configure_noctalia
+	configure_greeter
 
 	if [ -n "$FAILED_INSTALLS" ]; then
 		log "finished with install failures:"
@@ -1661,8 +1896,8 @@ main()
 	else
 		log "done"
 	fi
-	if selected gnome || selected niri; then
-		log "reboot, then choose your desktop in GDM"
+	if selected gnome || selected niri || selected greeter; then
+		log "reboot, then choose your desktop at the login screen"
 	fi
 }
 
