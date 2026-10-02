@@ -30,7 +30,7 @@ jobs:
           prepare: |
             env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
             mkdir -p /usr/local/etc/pkg/repos
-            printf '%s\n' 'FreeBSD: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest" }' > /usr/local/etc/pkg/repos/FreeBSD.conf
+            printf '%s\n' 'FreeBSD: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest", mirror_type: "srv" }' > /usr/local/etc/pkg/repos/FreeBSD.conf
             pkg update -f
             pkg install -y python3 jq xorg-vfbserver xdotool mesa-dri mesa-libs
           run: |
