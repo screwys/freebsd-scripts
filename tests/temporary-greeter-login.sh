@@ -49,6 +49,15 @@ finish()
 	status=$?
 	trap - EXIT
 	set +e
+	if { [ "$status" -ne 0 ] || ! "$passed"; } && [ -n "$xvfb_pid" ]; then
+		DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '' \
+			>"$fixture_root/window-ids.txt" 2>"$fixture_root/windows.log"
+		while IFS= read -r window_id; do
+			printf '\nwindow=%s\n' "$window_id"
+			DISPLAY=:99 timeout 5 xdotool getwindowname "$window_id"
+			DISPLAY=:99 timeout 5 xdotool getwindowgeometry --shell "$window_id"
+		done <"$fixture_root/window-ids.txt" >>"$fixture_root/windows.log" 2>&1
+	fi
 	[ -z "$greetd_pid" ] || stop_tree "$greetd_pid"
 	pkill -TERM -u 2001 2>/dev/null
 	[ -z "$xvfb_pid" ] || kill -TERM "$xvfb_pid" 2>/dev/null
@@ -80,7 +89,7 @@ finish()
 		jq -n --arg stage "$stage" --argjson exitStatus "$status" \
 			'{status: "failed", stage: $stage, exitStatus: $exitStatus}' >"$fixture_root/result.json"
 		for file in "$fixture_root/greetd.log" "$fixture_root/greeter.log" "$fixture_root/xvfb.log" \
-			"$report_dir/probe.log" "$report_dir/failure.json"; do
+			"$fixture_root/windows.log" "$report_dir/probe.log" "$report_dir/failure.json"; do
 			[ ! -f "$file" ] || { printf '\n%s\n' "$file"; tail -n 100 "$file"; }
 		done
 	fi
@@ -123,14 +132,19 @@ log_reached()
 greeter_ready()
 {
 	log_reached 'greeter initialized (' "$1" || return 1
-	greeter_window=$(DISPLAY=:99 timeout 5 xdotool search --onlyvisible --name '^wlroots' 2>/dev/null | head -n 1)
-	[ -n "$greeter_window" ]
+	# wlroots 0.20 sets _NET_WM_NAME; xdotool searches WM_NAME.
+	# This private Xvfb has one output, so select its single visible root child.
+	visible_windows=$(DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '' 2>/dev/null) || return 1
+	greeter_window=$(printf '%s\n' "$visible_windows" | awk -v root="$root_window" '
+		$0 != root { count++; window = $0 }
+		END { if (count == 1) print window; else exit 1 }
+	')
 }
 
 greeter_returned()
 {
-	! DISPLAY=:99 timeout 5 xdotool getwindowname "$first_window" >/dev/null 2>&1 || return 1
-	greeter_ready 2
+	! DISPLAY=:99 timeout 5 xdotool getwindowgeometry "$first_window" >/dev/null 2>&1 || return 1
+	greeter_ready 2 && [ "$greeter_window" != "$first_window" ]
 }
 
 submit_password()
@@ -194,6 +208,7 @@ stage=initial-greeter
 Xvfb :99 -screen 0 1280x800x24 -nolisten tcp -ac >"$fixture_root/xvfb.log" 2>&1 &
 xvfb_pid=$!
 wait_until 'Xvfb' env DISPLAY=:99 timeout 5 xdotool getdisplaygeometry
+root_window=$(DISPLAY=:99 timeout 5 xdotool search --screen 0 --maxdepth 0 --name '')
 greetd -c "$fixture_root/config.toml" >"$fixture_root/greetd.log" 2>&1 &
 greetd_pid=$!
 wait_until 'initial greeter' greeter_ready 1
