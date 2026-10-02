@@ -18,6 +18,12 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Restore corrected Niri package
+        id: niri-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-packages/niri.pkg
+          key: freebsd-15.1-niri-${{ hashFiles('install.sh', 'patches/niri-calloop-freebsd.patch') }}
       - name: Build and log in on FreeBSD
         uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
         with:
@@ -28,7 +34,7 @@ jobs:
           cpu: 2
           copyback: true
           cache-after-prepare: true
-          # Binaries are unchanged since 62cfbf4; refresh the PAM policy below.
+          # Reuse the shell/greeter image; update Niri and the PAM policy below.
           prepare: |
             # Native build key: ed7eadb189706e01502f78f3b8514ab117d8979b67538111b5844caf9c3dc7d1
             env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
@@ -38,7 +44,24 @@ jobs:
             /tmp/temporary-greetd-socket
             sh tests/temporary-greeter-build.sh
           run: |
+            set -e
             set +x
+            export INSTALL_PATCH_DIR="$PWD/patches"
+            sed '$d' install.sh > /tmp/freebsd-installer-functions.sh
+            (
+              . /tmp/freebsd-installer-functions.sh
+              if [ -f ci-packages/niri.pkg ]; then
+                pkg add -f ci-packages/niri.pkg
+              else
+                install_ports "$NIRI_PORTS_REF" x11-wm/niri niri-calloop-freebsd.patch reinstall
+                test -z "$FAILED_INSTALLS"
+                mkdir -p ci-packages
+                package_name=$(pkg query '%n-%v' niri)
+                pkg create -o ci-packages niri
+                mv "ci-packages/$package_name.pkg" ci-packages/niri.pkg
+              fi
+              configure_niri_session
+            )
             awk '
               /write_file.*\/etc\/pam.d\/greetd\)/ { policy = 1; next }
               policy && /^EOF$/ { exit }
@@ -58,6 +81,12 @@ jobs:
             exit 0
       - name: Check login result
         run: test "$(cat ci-reports/exit-status)" = 0
+      - name: Save corrected Niri package
+        if: always() && steps.niri-cache.outputs.cache-hit != 'true' && hashFiles('ci-packages/niri.pkg') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-packages/niri.pkg
+          key: ${{ steps.niri-cache.outputs.cache-primary-key }}
       - name: Save synthetic CI reports
         if: always()
         uses: actions/upload-artifact@v4

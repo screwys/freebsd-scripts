@@ -1,0 +1,102 @@
+diff --git a/x11-wm/niri/Makefile b/x11-wm/niri/Makefile
+--- a/x11-wm/niri/Makefile
++++ b/x11-wm/niri/Makefile
+@@ -1,7 +1,7 @@
+ PORTNAME=	niri
+ DISTVERSIONPREFIX=	v
+ DISTVERSION=	26.04
+-PORTREVISION=	6
++PORTREVISION=	7
+ CATEGORIES=	x11-wm wayland
+ 
+ MAINTAINER=	lme@FreeBSD.org
+diff --git a/x11-wm/niri/files/patch-calloop_async-fd-lifetime b/x11-wm/niri/files/patch-calloop_async-fd-lifetime
+new file mode 100644
+index 0000000..0b1c8a0
+--- /dev/null
++++ b/x11-wm/niri/files/patch-calloop_async-fd-lifetime
+@@ -0,0 +1,84 @@
++https://github.com/Smithay/calloop/commit/8feacf046ff25b7c06d6d4f45a1cc4c494a6920a
++
++--- cargo-crates/calloop-0.14.4/src/io.rs.orig
+++++ cargo-crates/calloop-0.14.4/src/io.rs
++@@ -201,30 +201,61 @@
++ 
++ impl<Data> IoLoopInner for LoopInner<'_, Data> {
++     unsafe fn register(&self, dispatcher: &RefCell<IoDispatcher>) -> crate::Result<()> {
++-        let disp = dispatcher.borrow();
++-        self.poll.borrow_mut().register(
++-            unsafe { BorrowedFd::borrow_raw(disp.fd) },
++-            Interest::EMPTY,
++-            Mode::OneShot,
++-            disp.token.expect("No token for IO dispatcher"),
++-        )
+++        let result = {
+++            let disp = dispatcher.borrow();
+++            self.poll.borrow_mut().register(
+++                unsafe { BorrowedFd::borrow_raw(disp.fd) },
+++                Interest::EMPTY,
+++                Mode::OneShot,
+++                disp.token.expect("No token for IO dispatcher"),
+++            )
+++        };
+++
+++        if result.is_ok() {
+++            dispatcher.borrow_mut().is_registered = true;
+++        }
+++
+++        result
++     }
++ 
++     fn reregister(&self, dispatcher: &RefCell<IoDispatcher>) -> crate::Result<()> {
++-        let disp = dispatcher.borrow();
++-        self.poll.borrow_mut().reregister(
++-            unsafe { BorrowedFd::borrow_raw(disp.fd) },
++-            disp.interest,
++-            Mode::OneShot,
++-            disp.token.expect("No token for IO dispatcher"),
++-        )
+++        let result = {
+++            let disp = dispatcher.borrow();
+++            self.poll.borrow_mut().reregister(
+++                unsafe { BorrowedFd::borrow_raw(disp.fd) },
+++                disp.interest,
+++                Mode::OneShot,
+++                disp.token.expect("No token for IO dispatcher"),
+++            )
+++        };
+++
+++        if result.is_ok() {
+++            dispatcher.borrow_mut().is_registered = true;
+++        }
+++
+++        result
++     }
++ 
++     fn kill(&self, dispatcher: &RefCell<IoDispatcher>) {
++-        let token = dispatcher
++-            .borrow()
++-            .token
++-            .expect("No token for IO dispatcher");
+++        let (token, fd, registered) = {
+++            let disp = dispatcher.borrow();
+++            (
+++                disp.token.expect("No token for IO dispatcher"),
+++                disp.fd,
+++                disp.is_registered,
+++            )
+++        };
+++
+++        if registered
+++            && self
+++                .poll
+++                .borrow_mut()
+++                .unregister(unsafe { BorrowedFd::borrow_raw(fd) })
+++                .is_ok()
+++        {
+++            dispatcher.borrow_mut().is_registered = false;
+++        }
+++
++         if let Ok(slot) = self.sources.borrow_mut().get_mut(token.inner) {
++             slot.source = None;
++         }

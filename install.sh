@@ -22,6 +22,7 @@ INSTALL_SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 INSTALL_PATCH_DIR=${INSTALL_PATCH_DIR:-$INSTALL_SOURCE_DIR/patches}
 # This snapshot still includes Vesktop and Electron 40.
 APP_PORTS_REF=596ce5964e00f1b40fb5bee30beea9268477a591
+NIRI_PORTS_REF=48681c24ef54884db0aee1cd4485cd9d860c7d5f
 LAZYVIM_REF=803bc181d7c0d6d5eeba9274d9be49b287294d99
 
 BASE_PACKAGES='
@@ -119,7 +120,6 @@ noto-sans
 '
 
 NIRI_PACKAGES='
-niri
 xwayland-satellite
 pipewire
 wireplumber
@@ -809,12 +809,15 @@ install_ports()
 {
 	ports_ref=$1
 	app_ports=$2
+	ports_patch=${3:-}
+	install_target=${4:-install}
 	if [ "$DRY_RUN" -eq 1 ]; then
 		log "would build and install $app_ports from FreeBSD ports revision $ports_ref"
 		return 0
 	fi
 
-	set -- /bin/sh -s -- "$ports_ref" "$app_ports"
+	set -- /bin/sh -s -- "$ports_ref" "$app_ports" "$ports_patch" \
+		"$INSTALL_PATCH_DIR/$ports_patch" "${INSTALL_URL%/*}/patches/$ports_patch" "$install_target"
 	if [ "$TARGET" != "/" ]; then
 		set -- chroot "$TARGET" "$@"
 	fi
@@ -823,16 +826,27 @@ set -eu
 set -f
 ref=$1
 app_ports=$2
+ports_patch=$3
+install_target=$6
 build_root=$(mktemp -d)
 trap 'rm -rf "$build_root"' EXIT HUP INT TERM
 git init "$build_root/ports"
 git -C "$build_root/ports" remote add origin https://github.com/freebsd/freebsd-ports.git
 git -C "$build_root/ports" fetch --depth 1 origin "$ref"
 git -C "$build_root/ports" checkout --detach FETCH_HEAD
+if [ -n "$ports_patch" ]; then
+	patch_file=$4
+	if [ ! -r "$patch_file" ]; then
+		patch_file="$build_root/ports.patch"
+		fetch -o "$patch_file" "$5"
+	fi
+	git -C "$build_root/ports" apply "$patch_file"
+fi
 failed_ports=
 for origin in $app_ports; do
+	# Build before replacing an existing package.
 	if make -C "$build_root/ports/$origin" PORTSDIR="$build_root/ports" \
-		BATCH=yes USE_PACKAGE_DEPENDS=yes install clean; then
+		BATCH=yes USE_PACKAGE_DEPENDS=yes MAKE_JOBS_NUMBER="${BUILD_JOBS:-2}" stage "$install_target" clean; then
 		:
 	else
 		printf '%s\n' "warn: $origin failed; continuing" >&2
@@ -1877,6 +1891,9 @@ main()
 	need_root
 
 	install_packages
+	if selected niri; then
+		install_ports "$NIRI_PORTS_REF" "x11-wm/niri" niri-calloop-freebsd.patch reinstall
+	fi
 	if selected apps; then
 		install_ports "$APP_PORTS_REF" "net-im/signal-desktop net-im/vesktop"
 	fi
