@@ -22,6 +22,7 @@ fixture_root=/tmp/freebsd-greeter-ci
 login_home=$(getent passwd ci-login | awk -F: '{print $6}')
 profile=$login_home/.profile
 niri_config=$login_home/.config/niri/config.kdl
+niri_launcher=/usr/local/bin/freebsd-niri-session
 report_dir=$login_home/.cache/freebsd-greeter-ci
 greeter_uid=$(id -u greetd)
 greeter_gid=$(id -g greetd)
@@ -31,6 +32,7 @@ xvfb_pid=
 profile_saved=false
 profile_created=false
 niri_saved=false
+niri_launcher_saved=false
 passed=false
 
 mkdir -p "$fixture_root"
@@ -79,6 +81,9 @@ finish()
 	fi
 	if "$niri_saved"; then
 		cp -p "$fixture_root/config.kdl.original" "$niri_config" || status=1
+	fi
+	if "$niri_launcher_saved"; then
+		cp -p "$fixture_root/niri-launcher.original" "$niri_launcher" || status=1
 	fi
 	if [ -d "$report_dir" ]; then
 		rm -rf "$fixture_root/session"
@@ -154,7 +159,7 @@ submit_password()
 [ -f "$niri_config" ] || fail 'installer-generated Niri configuration is missing'
 [ -f /usr/local/etc/greetd/config.toml ] || fail 'installed greetd configuration is missing'
 [ -x /usr/local/bin/freebsd-noctalia-greeter-session ] || fail 'installed greeter session wrapper is missing'
-[ -x /usr/local/bin/freebsd-niri-session ] || fail 'installed Niri session wrapper is missing'
+[ -x "$niri_launcher" ] || fail 'installed Niri session wrapper is missing'
 [ -f /usr/local/share/wayland-sessions/niri.desktop ] || fail 'installed Niri desktop entry is missing'
 
 rm -f "$fixture_root/result.json" "$fixture_root/greeter.log"
@@ -185,6 +190,12 @@ cp -p "$niri_config" "$fixture_root/config.kdl.original"
 niri_saved=true
 printf '\nspawn-at-startup "%s/run-probe"\n' "$fixture_root" >>"$niri_config"
 niri validate -c "$niri_config"
+
+# Keep the installed wrapper and use Niri's windowed mode inside Xvfb.
+cp -p "$niri_launcher" "$fixture_root/niri-launcher.original"
+niri_launcher_saved=true
+sed 's|/usr/local/bin/niri --session$|/usr/local/bin/niri|' \
+	"$fixture_root/niri-launcher.original" >"$niri_launcher"
 
 awk -v command="env DISPLAY=:99 WLR_BACKENDS=x11 WLR_X11_OUTPUTS=1 WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1 WLR_LOG=info NOCTALIA_GREETER_LOG=$fixture_root/greeter.log /usr/local/bin/freebsd-noctalia-greeter-session --user ci-login --session Niri" '
 	/^\[/ { section = $0 }
@@ -246,7 +257,7 @@ wait_until 'returned authentication cancellation reply' log_reached 'greetd repl
 kill -0 "$greetd_pid"
 
 jq -n --slurpfile session "$report_dir/identity.json" \
-	'{status: "passed", wrongPasswordRejected: true, authenticatedSession: $session[0],
+	'{status: "passed", displayBackend: "nested-x11", wrongPasswordRejected: true, authenticatedSession: $session[0],
 	  noctaliaBarMapped: true, noctaliaLogoutAccepted: true, returnedGreeterRejectedWrongPassword: true}' \
 	>"$fixture_root/result.json"
 passed=true
