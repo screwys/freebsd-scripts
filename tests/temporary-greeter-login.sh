@@ -132,6 +132,7 @@ log_reached()
 greeter_ready()
 {
 	log_reached 'greeter initialized (' "$1" || return 1
+	log_reached 'presented first frame ' "$1" || return 1
 	# wlroots 0.20 sets _NET_WM_NAME; xdotool searches WM_NAME.
 	# This private Xvfb has one output, so select its single visible root child.
 	visible_windows=$(DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '.*' 2>/dev/null) || return 1
@@ -139,12 +140,6 @@ greeter_ready()
 		$0 != root { count++; window = $0 }
 		END { if (count == 1) print window; else exit 1 }
 	')
-}
-
-greeter_returned()
-{
-	! DISPLAY=:99 timeout 5 xdotool getwindowgeometry "$first_window" >/dev/null 2>&1 || return 1
-	greeter_ready 2 && [ "$greeter_window" != "$first_window" ]
 }
 
 submit_password()
@@ -212,12 +207,13 @@ root_window=$(DISPLAY=:99 timeout 5 xdotool search --screen 0 --maxdepth 0 --nam
 greetd -c "$fixture_root/config.toml" >"$fixture_root/greetd.log" 2>&1 &
 greetd_pid=$!
 wait_until 'initial greeter' greeter_ready 1
-first_window=$greeter_window
 
 stage=wrong-password
 submit_password "$ci_wrong_password"
-wait_until 'PAM rejection' log_reached 'authentication failed:' 1
-wait_until 'authentication cancellation' log_reached 'greetd reply to cancel_session: success' 1
+wait_until 'PAM password prompt' log_reached 'PAM secret message:' 1
+wait_until 'PAM rejection' log_reached 'authentication failed: pam_authenticate: AUTH_ERR' 1
+# An exited PAM worker can produce an error reply after its session was removed.
+wait_until 'authentication cancellation reply' log_reached 'greetd reply to cancel_session:' 1
 [ ! -f "$report_dir/identity.json" ] || fail 'a session started after the wrong password'
 
 stage=authenticated-session
@@ -238,13 +234,15 @@ stage=logout
 touch "$report_dir/logout"
 wait_until 'Noctalia logout reply' test -f "$report_dir/complete.json"
 jq -e '.status == "passed"' "$report_dir/complete.json" >/dev/null
-wait_until 'returned greeter' greeter_returned
+wait_until 'returned greeter' greeter_ready 2
 
 stage=returned-greeter-authentication
+secret_prompt_target=$(($(log_count 'PAM secret message:') + 1))
 submit_password "$ci_wrong_password"
 unset ci_wrong_password
-wait_until 'PAM rejection from the returned greeter' log_reached 'authentication failed:' 2
-wait_until 'returned authentication cancellation' log_reached 'greetd reply to cancel_session: success' 2
+wait_until 'returned greeter PAM password prompt' log_reached 'PAM secret message:' "$secret_prompt_target"
+wait_until 'PAM rejection from the returned greeter' log_reached 'authentication failed: pam_authenticate: AUTH_ERR' 2
+wait_until 'returned authentication cancellation reply' log_reached 'greetd reply to cancel_session:' 2
 kill -0 "$greetd_pid"
 
 jq -n --slurpfile session "$report_dir/identity.json" \

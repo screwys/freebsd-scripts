@@ -28,8 +28,9 @@ jobs:
           cpu: 2
           copyback: true
           cache-after-prepare: true
+          # Binaries are unchanged since 62cfbf4; refresh the PAM policy below.
           prepare: |
-            # Native build key: ${{ hashFiles('install.sh', 'patches/**', 'tests/temporary-greeter-build.sh') }}
+            # Native build key: ed7eadb189706e01502f78f3b8514ab117d8979b67538111b5844caf9c3dc7d1
             env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
             pkg update -f
             pkg install -y python3 jq xorg-vfbserver xdotool mesa-dri mesa-libs
@@ -38,6 +39,11 @@ jobs:
             sh tests/temporary-greeter-build.sh
           run: |
             set +x
+            awk '
+              /write_file.*\/etc\/pam.d\/greetd\)/ { policy = 1; next }
+              policy && /^EOF$/ { exit }
+              policy { print }
+            ' install.sh > /etc/pam.d/greetd
             CI_LOGIN_PASSWORD=$(openssl rand -hex 20)
             printf '%s\n' "$CI_LOGIN_PASSWORD" | pw usermod ci-login -h 0
             export CI_LOGIN_PASSWORD

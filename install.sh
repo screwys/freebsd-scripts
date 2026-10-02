@@ -1104,8 +1104,8 @@ service = "greetd-greeter"
 EOF
 
 	write_file "$(target_path /etc/pam.d/greetd)" 0644 <<'EOF'
-auth      requisite pam_nologin.so
 auth      include   system
+account   requisite pam_nologin.so
 account   include   system
 session   include   system
 password  include   system
