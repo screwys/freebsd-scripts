@@ -395,7 +395,7 @@ index f703f9d..a1bb7e4 100644
      })
      .map(drop)
 diff --git a/greetd/src/session/worker.rs b/greetd/src/session/worker.rs
-index 29ff2be..ce4f242 100644
+index 29ff2be..2ab5c9a 100644
 --- a/greetd/src/session/worker.rs
 +++ b/greetd/src/session/worker.rs
 @@ -1,10 +1,12 @@
@@ -459,6 +459,30 @@ index 29ff2be..ce4f242 100644
  
              // Set our parent death signal. setuid/setgid above resets the
              // death signal, which is why we do this here.
+@@ -294,7 +313,11 @@ fn worker(sock: &UnixDatagram) -> Result<(), Error> {
+ 
+     // Signal the inner PID to the parent process.
+     SessionChildToParent::FinalChildPid(child.as_raw() as u64).send(sock)?;
+-    sock.shutdown(std::net::Shutdown::Both)?;
++    match sock.shutdown(std::net::Shutdown::Both) {
++        // FreeBSD may disconnect the peer after it receives the final PID.
++        Err(e) if cfg!(target_os = "freebsd") && e.raw_os_error() == Some(libc::ENOTCONN) => (),
++        result => result?,
++    }
+ 
+     // Set our parent death signal. setsid above resets the signal, hence our
+     // late assignment, which is why we do this here.
+@@ -326,6 +349,10 @@ fn worker(sock: &UnixDatagram) -> Result<(), Error> {
+ 
+ pub fn main(sock: &UnixDatagram) -> Result<(), Error> {
+     if let Err(e) = worker(sock) {
++        eprintln!(
++            "{:?} session worker error: {e}",
++            std::time::SystemTime::now()
++        );
+         SessionChildToParent::Error(e.clone()).send(sock)?;
+         Err(e)
+     } else {
 diff --git a/greetd/src/terminal/mod.rs b/greetd/src/terminal/mod.rs
 index 68ae0ae..a5e5332 100644
 --- a/greetd/src/terminal/mod.rs

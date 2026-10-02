@@ -94,8 +94,8 @@ rust-analyzer
 '
 
 DESKTOP_PACKAGES='
-xorg
-gdm
+xorg-server
+xinit
 ghostty
 gnome-keyring
 polkit
@@ -662,6 +662,9 @@ package_manifest()
 		printf '%s\n' "$BASE_PACKAGES"
 		if selected gnome || selected niri || selected greeter; then
 			printf '%s\n' "$DESKTOP_PACKAGES"
+			if ! selected greeter; then
+				printf '%s\n' gdm
+			fi
 		fi
 		for component in $COMPONENTS; do
 			case "$component" in
@@ -687,13 +690,22 @@ ensure_pkg_repo()
 {
 	repo_dir=$(target_path /usr/local/etc/pkg/repos)
 	repo_file=$(target_path /usr/local/etc/pkg/repos/FreeBSD.conf)
+	repo_name=FreeBSD
+	if grep -q '^FreeBSD-ports[[:space:]]*:' "$(target_path /etc/pkg/FreeBSD.conf)" 2>/dev/null; then
+		repo_name=FreeBSD-ports
+	fi
 	if [ "$DRY_RUN" -eq 1 ]; then
 		log "would set FreeBSD pkg branch to $PKG_BRANCH"
 		return 0
 	fi
 	mkdir -p "$repo_dir"
-	cat >"$repo_file" <<EOF
-FreeBSD: {
+	if [ "$repo_name" = FreeBSD-ports ]; then
+		printf '%s\n' 'FreeBSD: { enabled: no }' >"$repo_file"
+	else
+		: >"$repo_file"
+	fi
+	cat >>"$repo_file" <<EOF
+$repo_name: {
   url: "pkg+https://pkg.FreeBSD.org/\${ABI}/$PKG_BRANCH",
   mirror_type: "srv",
   signature_type: "fingerprints",
@@ -1183,7 +1195,8 @@ EOF
 			mv "$ttys_tmp" "$ttys"
 		fi
 	else
-		warn "Noctalia Greeter is not installed; keeping GDM enabled"
+		warn "Noctalia Greeter is not installed; installing GDM fallback"
+		try_install "GDM fallback" run_in_target "env ASSUME_ALWAYS_YES=yes pkg install -y gdm"
 	fi
 }
 

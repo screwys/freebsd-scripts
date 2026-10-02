@@ -166,6 +166,25 @@ index 1e709b1..506a02b 100644
  #include <nlohmann/json.hpp>
  #include <pwd.h>
  #include <sstream>
+diff --git a/src/main.cpp b/src/main.cpp
+index 960d792..754186e 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -239,7 +239,13 @@ int main(int argc, char* argv[]) {
+   }
+ 
+   Greeter greeter;
+-  if (!greeter.initialize(client)) {
++  bool initialized = false;
++  try {
++    initialized = greeter.initialize(client);
++  } catch (const std::exception& e) {
++    kLog.error("greeter initialization failed: {}", e.what());
++  }
++  if (!initialized) {
+     kLog.error("failed to initialize greeter");
+     if (greetdLaunched) {
+       preventGreetdRespawnLoop();
 diff --git a/src/render/core/image_file_loader.cpp b/src/render/core/image_file_loader.cpp
 index 3db5cbc..04e72fa 100644
 --- a/src/render/core/image_file_loader.cpp

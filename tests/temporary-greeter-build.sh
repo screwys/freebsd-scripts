@@ -26,13 +26,22 @@ sh tests/install-sh.sh
 if ! id ci-login >/dev/null 2>&1; then
 	pw useradd ci-login -u 2001 -m -s /bin/sh
 fi
-CI_LOGIN_PASSWORD=$(openssl rand -hex 20)
-printf '%s\n' "$CI_LOGIN_PASSWORD" | pw usermod ci-login -h 0
-export CI_LOGIN_PASSWORD BUILD_JOBS=2
+export BUILD_JOBS=2
 
+mkfifo ci-reports/install.pipe
+tee ci-reports/install.log <ci-reports/install.pipe &
+log_pid=$!
 INSTALL_COMPONENTS='niri greeter' GPU_MODULE=none INSTALL_PATCH_DIR="$repo_dir/patches" \
-	sh install.sh --user ci-login >ci-reports/install.log 2>&1
-cat ci-reports/install.log
+	sh install.sh --user ci-login >ci-reports/install.pipe 2>&1 &
+install_pid=$!
+if wait "$install_pid"; then
+	install_status=0
+else
+	install_status=$?
+fi
+wait "$log_pid"
+rm ci-reports/install.pipe
+[ "$install_status" -eq 0 ] || exit "$install_status"
 
 for binary in niri noctalia greetd noctalia-greeter noctalia-greeter-compositor; do
 	test -x "/usr/local/bin/$binary"
@@ -44,4 +53,5 @@ test -f /etc/pam.d/greetd-greeter
 test -f /var/lib/noctalia-greeter/greeter.toml
 test -d /usr/local/share/noctalia-greeter/assets
 service dbus onestart
-sh tests/temporary-greeter-login.sh
+# The cached VM has no physical GPU. The fixture starts greetd on its X server.
+sysrc greetd_enable=NO gdm_enable=NO seatd_enable=NO

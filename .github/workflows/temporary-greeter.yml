@@ -27,14 +27,31 @@ jobs:
           mem: 8192
           cpu: 2
           copyback: true
+          cache-after-prepare: true
           prepare: |
+            # Native build key: ${{ hashFiles('install.sh', 'patches/**', 'tests/temporary-greeter-build.sh') }}
             env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
-            mkdir -p /usr/local/etc/pkg/repos
-            printf '%s\n' 'FreeBSD: { url: "pkg+https://pkg.FreeBSD.org/${ABI}/latest", mirror_type: "srv" }' > /usr/local/etc/pkg/repos/FreeBSD.conf
             pkg update -f
             pkg install -y python3 jq xorg-vfbserver xdotool mesa-dri mesa-libs
-          run: |
+            cc -Wall -Wextra tests/temporary-greetd-socket.c -o /tmp/temporary-greetd-socket
+            /tmp/temporary-greetd-socket
             sh tests/temporary-greeter-build.sh
+          run: |
+            set +x
+            CI_LOGIN_PASSWORD=$(openssl rand -hex 20)
+            printf '%s\n' "$CI_LOGIN_PASSWORD" | pw usermod ci-login -h 0
+            export CI_LOGIN_PASSWORD
+            if sh tests/temporary-greeter-login.sh; then
+              login_status=0
+            else
+              login_status=$?
+            fi
+            mkdir -p ci-reports
+            cp -R /tmp/freebsd-greeter-ci/. ci-reports/
+            printf '%s\n' "$login_status" >ci-reports/exit-status
+            exit 0
+      - name: Check login result
+        run: test "$(cat ci-reports/exit-status)" = 0
       - name: Save synthetic CI reports
         if: always()
         uses: actions/upload-artifact@v4
