@@ -50,7 +50,7 @@ finish()
 	trap - EXIT
 	set +e
 	if { [ "$status" -ne 0 ] || ! "$passed"; } && [ -n "$xvfb_pid" ]; then
-		DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '' \
+		DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '.*' \
 			>"$fixture_root/window-ids.txt" 2>"$fixture_root/windows.log"
 		while IFS= read -r window_id; do
 			printf '\nwindow=%s\n' "$window_id"
@@ -134,7 +134,7 @@ greeter_ready()
 	log_reached 'greeter initialized (' "$1" || return 1
 	# wlroots 0.20 sets _NET_WM_NAME; xdotool searches WM_NAME.
 	# This private Xvfb has one output, so select its single visible root child.
-	visible_windows=$(DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '' 2>/dev/null) || return 1
+	visible_windows=$(DISPLAY=:99 timeout 5 xdotool search --screen 0 --onlyvisible --maxdepth 1 --name '.*' 2>/dev/null) || return 1
 	greeter_window=$(printf '%s\n' "$visible_windows" | awk -v root="$root_window" '
 		$0 != root { count++; window = $0 }
 		END { if (count == 1) print window; else exit 1 }
@@ -208,7 +208,7 @@ stage=initial-greeter
 Xvfb :99 -screen 0 1280x800x24 -nolisten tcp -ac >"$fixture_root/xvfb.log" 2>&1 &
 xvfb_pid=$!
 wait_until 'Xvfb' env DISPLAY=:99 timeout 5 xdotool getdisplaygeometry
-root_window=$(DISPLAY=:99 timeout 5 xdotool search --screen 0 --maxdepth 0 --name '')
+root_window=$(DISPLAY=:99 timeout 5 xdotool search --screen 0 --maxdepth 0 --name '.*')
 greetd -c "$fixture_root/config.toml" >"$fixture_root/greetd.log" 2>&1 &
 greetd_pid=$!
 wait_until 'initial greeter' greeter_ready 1
