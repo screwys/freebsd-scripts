@@ -54,4 +54,4 @@ test -f /var/lib/noctalia-greeter/greeter.toml
 test -d /usr/local/share/noctalia-greeter/assets
 service dbus onestart
 # The cached VM has no physical GPU. The fixture starts greetd on its X server.
-sysrc greetd_enable=NO gdm_enable=NO seatd_enable=NO
+sysrc greetd_enable=NO gdm_enable=NO seatd_enable=NO sshd_enable=YES
